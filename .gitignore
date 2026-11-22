@@ -1,0 +1,10 @@
+android/.gradle/
+android/build/
+android/*/build/
+android/local.properties
+android/.kotlin/
+*.iml
+.idea/
+__pycache__/
+*.keystore
+!android/app/debug-release.keystore
