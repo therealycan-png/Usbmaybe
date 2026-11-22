@@ -51,63 +51,114 @@ class IngestEngine(
     /** Told about every stored file (BackupTracker uses it to account for free space). */
     var onStored: (Long) -> Unit = {},
 ) {
+    /** Guards dedupe + ledger + rename (commit stage). */
     private val lock = Any()
+    /** Guards only the space reservation, so the cable thread never waits on a commit. */
+    private val spaceLock = Any()
     /** Bytes promised to transfers in progress (USB job + Wi-Fi uploads at the same time). */
     private var inFlight = 0L
     private val startedAt = System.currentTimeMillis()
 
     fun freeBytes(): Long = storage.freeBytes()
 
-    fun hasRoomFor(size: Long): Boolean = synchronized(lock) { storage.freeBytes() - inFlight - size >= reserveBytes }
+    fun hasRoomFor(size: Long): Boolean = synchronized(spaceLock) { storage.freeBytes() - inFlight - size >= reserveBytes }
 
     /** The finished record for this file, or null if it still needs sending (never sent, or lost before backup). */
     fun alreadyHave(deviceKey: String, itemKey: String): Item? =
         ledger.find(deviceKey, itemKey)?.takeIf { ledger.isDone(it) }
 
+    /** A file that has arrived in a temp file but is not verified or recorded yet. */
+    class Pending internal constructor(
+        val profile: DeviceProfile, val itemKey: String, val originalName: String, val size: Long,
+        val dateTakenMs: Long, internal val tmp: File, internal val dir: File, internal val need: Long,
+        /** SHA-256 the writer computed from the exact bytes it wrote (streaming), if it could. */
+        internal val writerSha: String?,
+    )
+
     /**
-     * @param expectedSha256 from the sender if it computed one (Wi-Fi path); null for USB
-     *        (USB/MTP has no source hash, so we verify exact size + record the on-disk hash).
-     * @param write fills the temp file with the source bytes.
-     * @param size exact size, or [UNKNOWN_SIZE] when the source can't say (PTP files over 4 GB):
-     *        then the video's box structure must be complete instead.
+     * Stage 1 (talks to the cable / network): reserve space, write the bytes to a temp file.
+     * @return null if this file is already done.
+     * @param write writes the source bytes into the file; returns their SHA-256 if it hashed them on the way.
      */
-    fun ingest(
-        profile: DeviceProfile,
-        itemKey: String,
-        originalName: String,
-        size: Long,
-        dateTakenMs: Long,
-        expectedSha256: String?,
-        write: (File) -> Unit,
-    ): IngestResult {
-        alreadyHave(profile.deviceKey, itemKey)?.let { return IngestResult.AlreadyHave(it) }
+    fun receive(profile: DeviceProfile, itemKey: String, originalName: String, size: Long, dateTakenMs: Long,
+                checkDone: Boolean = true, prepareAhead: Boolean = false, write: (File) -> String?): Pending? {
+        if (checkDone && alreadyHave(profile.deviceKey, itemKey) != null) return null
         val sizeKnown = size != UNKNOWN_SIZE
         val need = if (sizeKnown) size else BIG_FILE_ESTIMATE
-        synchronized(lock) {
+        synchronized(spaceLock) {
             if (storage.freeBytes() - inFlight - need < reserveBytes) throw NotEnoughSpace(need + reserveBytes, storage.freeBytes())
             inFlight += need
         }
-        val dir = File(storage.rootDir(), Naming.folderName(profile.owner, profile.label))
-        val tmp = File(dir, ".pf-${System.nanoTime()}.part")
+        val dir = dirFor(profile)
+        var tmp = File(dir, ".pf-${System.nanoTime()}.part")
         try {
             if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create $dir (storage permission?)")
-            write(tmp)
+            if (prepareAhead) {
+                tmp = takePrepared(dir) ?: tmp
+                prepareNext(dir) // create the next temp file while this one transfers
+            }
+            val sha = write(tmp)
+            return Pending(profile, itemKey, originalName, size, dateTakenMs, tmp, dir, need, sha)
+        } catch (e: Throwable) {
+            tmp.delete(); synchronized(spaceLock) { inFlight -= need }
+            throw e
+        }
+    }
+
+    /** One empty temp file created ahead of time per folder: file creation never sits on the cable thread. */
+    private val prepared = java.util.concurrent.ConcurrentHashMap<File, java.util.concurrent.Future<File?>>()
+    private val preparer = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "pf-prep").apply { isDaemon = true } }
+
+    private fun takePrepared(dir: File): File? = try {
+        prepared.remove(dir)?.get()?.takeIf { it.exists() && it.length() == 0L }
+    } catch (_: Exception) { null }
+
+    private fun prepareNext(dir: File) {
+        prepared[dir] = preparer.submit<File?> {
+            val f = File(dir, ".pf-${System.nanoTime()}.part")
+            if (f.createNewFile()) f else null
+        }
+    }
+
+    /** Delete spare temp files made ahead of time (end of a run). */
+    fun discardPrepared() {
+        for (k in prepared.keys.toList()) takePrepared(k)?.delete()
+    }
+
+    private val dirs = java.util.concurrent.ConcurrentHashMap<String, File>()
+    private fun dirFor(profile: DeviceProfile): File =
+        dirs.getOrPut(Naming.folderName(profile.owner, profile.label)) { File(storage.rootDir(), Naming.folderName(profile.owner, profile.label)) }
+
+    /** Give up on a received file (cancel/unplug): nothing is recorded. */
+    fun abandon(p: Pending) { p.tmp.delete(); synchronized(spaceLock) { inFlight -= p.need } }
+
+    /**
+     * Stage 2 (disk only, can overlap the next file's transfer):
+     * fsync -> size/structure check -> SHA-256 -> compare -> dedupe -> rename -> ledger -> publish.
+     * A file is never in the ledger unless all of that passed.
+     * @param expectedSha256 the sender's own hash (Wi-Fi), compared end to end.
+     */
+    fun commit(p: Pending, expectedSha256: String?): IngestResult {
+        val tmp = p.tmp; val originalName = p.originalName; val profile = p.profile
+        var stored: Pair<File, Item>? = null
+        try {
             // Force the bytes onto flash BEFORE we verify or record anything (power loss safety).
             RandomAccessFile(tmp, "rw").use { it.fd.sync() }
             val len = tmp.length()
             if (len > GOOGLE_MAX_BYTES) throw TooBigForGoogle(originalName, len)
-            if (sizeKnown && len != size) throw VerifyFailed("$originalName: size $len != expected $size")
-            if (!sizeKnown && !(MediaTypes.isVideo(originalName) && Mp4Check.isComplete(tmp))) {
+            if (p.size != UNKNOWN_SIZE && len != p.size) throw VerifyFailed("$originalName: size $len != expected ${p.size}")
+            if (p.size == UNKNOWN_SIZE && !(MediaTypes.isVideo(originalName) && Mp4Check.isComplete(tmp))) {
                 throw VerifyFailed("$originalName: over 4 GB and arrived incomplete")
             }
-            val sha = Hashing.sha256(tmp)
+            // Bytes we streamed ourselves were hashed on the way; files written by the USB stack are read back.
+            val sha = p.writerSha ?: Hashing.sha256(tmp)
             if (expectedSha256 != null && !sha.equals(expectedSha256, ignoreCase = true)) {
                 throw VerifyFailed("$originalName: checksum mismatch")
             }
             synchronized(lock) {
-                alreadyHave(profile.deviceKey, itemKey)?.let { tmp.delete(); return IngestResult.AlreadyHave(it) }
+                alreadyHave(profile.deviceKey, p.itemKey)?.let { tmp.delete(); return IngestResult.AlreadyHave(it) }
                 // a lost (MISSING_UNKNOWN) or orphaned earlier record is replaced by this good copy
-                ledger.find(profile.deviceKey, itemKey)?.let { ledger.remove(it.id) }
+                ledger.find(profile.deviceKey, p.itemKey)?.let { ledger.remove(it.id) }
                 val original = ledger.findByHash(sha)?.takeIf { o ->
                     o.state == ItemState.BACKED_UP || o.state == ItemState.SOURCE_DELETED ||
                         (o.state == ItemState.VERIFIED && o.pixelPath != null && exists(o.pixelPath))
@@ -115,34 +166,54 @@ class IngestEngine(
                 if (original != null) {
                     tmp.delete()
                     val dup = ledger.insert(
-                        Item(deviceKey = profile.deviceKey, itemKey = itemKey, originalName = originalName,
-                            size = len, dateTakenMs = dateTakenMs, pixelPath = null, sha256 = sha,
+                        Item(deviceKey = profile.deviceKey, itemKey = p.itemKey, originalName = originalName,
+                            size = len, dateTakenMs = p.dateTakenMs, pixelPath = null, sha256 = sha,
                             state = ItemState.DUPLICATE, duplicateOf = original.id)
                     )
                     return IngestResult.Duplicate(dup)
                 }
-                val target = Naming.uniqueFile(dir, Naming.targetName(profile.owner, profile.label, originalName))
+                val target = Naming.uniqueFile(p.dir, Naming.targetName(profile.owner, profile.label, originalName))
                 if (!tmp.renameTo(target)) throw IOException("rename failed for $target")
-                storage.syncDir(dir)
-                if (dateTakenMs > 0) target.setLastModified(dateTakenMs)
+                if (p.dateTakenMs > 0) target.setLastModified(p.dateTakenMs)
                 val item = try {
                     ledger.insert(
-                        Item(deviceKey = profile.deviceKey, itemKey = itemKey, originalName = originalName,
-                            size = len, dateTakenMs = dateTakenMs, pixelPath = target.absolutePath,
+                        Item(deviceKey = profile.deviceKey, itemKey = p.itemKey, originalName = originalName,
+                            size = len, dateTakenMs = p.dateTakenMs, pixelPath = target.absolutePath,
                             sha256 = sha, state = ItemState.VERIFIED)
                     )
                 } catch (e: Exception) {
                     target.delete() // never leave a file the ledger doesn't know about
                     throw IOException("could not record ${target.name}: ${e.message}", e)
                 }
-                onStored(len)
-                storage.publish(target, MediaTypes.mimeFor(target.name), dateTakenMs)
-                return IngestResult.Stored(item)
+                stored = target to item
             }
+            // Outside the lock (slow, and safe in any order: if the rename were lost in a crash the
+            // file would read as missing -> MISSING_UNKNOWN -> re-sent; it can never become "backed up").
+            val (target, item) = stored!!
+            storage.syncDir(p.dir)
+            onStored(len)
+            storage.publish(target, MediaTypes.mimeFor(target.name), p.dateTakenMs)
+            return IngestResult.Stored(item)
         } finally {
             if (tmp.exists()) tmp.delete()
-            synchronized(lock) { inFlight -= need }
+            synchronized(spaceLock) { inFlight -= p.need }
         }
+    }
+
+    /**
+     * One file start to finish (both stages). The USB loop pipelines the stages instead.
+     * @param expectedSha256 from the sender (Wi-Fi path); null for USB.
+     * @param size exact size, or [UNKNOWN_SIZE] (PTP files over 4 GB: structure check instead).
+     */
+    fun ingest(profile: DeviceProfile, itemKey: String, originalName: String, size: Long, dateTakenMs: Long,
+               expectedSha256: String?, write: (File) -> Unit): IngestResult =
+        ingestHashed(profile, itemKey, originalName, size, dateTakenMs, expectedSha256) { write(it); null }
+
+    fun ingestHashed(profile: DeviceProfile, itemKey: String, originalName: String, size: Long, dateTakenMs: Long,
+                     expectedSha256: String?, write: (File) -> String?): IngestResult {
+        val p = receive(profile, itemKey, originalName, size, dateTakenMs, true, false, write)
+            ?: return IngestResult.AlreadyHave(alreadyHave(profile.deviceKey, itemKey)!!)
+        return commit(p, expectedSha256)
     }
 
     /** Remove temp files left by a crashed earlier run (never ones being written now). */

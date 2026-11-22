@@ -53,9 +53,12 @@ class SafSource(private val cr: ContentResolver, private val tree: Uri, label: S
         return out
     }
 
-    override fun copyTo(entry: SourceEntry, dest: File) {
+    override fun copyTo(entry: SourceEntry, dest: File) { copyHashed(entry, dest) }
+
+    /** Hash on the way through: no second read of the file is needed to verify it. */
+    override fun copyHashed(entry: SourceEntry, dest: File): String {
         val input = cr.openInputStream(Uri.parse(entry.ref)) ?: throw IOException("Cannot open ${entry.name}")
-        input.use { i -> dest.outputStream().use { o -> i.copyTo(o, 1 shl 20) } }
+        return input.use { i -> dest.outputStream().use { o -> app.pixelferry.core.Hashing.copyHashing(i, o) } }
     }
 
     override fun delete(entry: SourceEntry): Boolean = try {

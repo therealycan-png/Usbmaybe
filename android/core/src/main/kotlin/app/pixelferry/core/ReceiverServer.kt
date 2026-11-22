@@ -215,8 +215,9 @@ class ReceiverServer(
             return false
         }
         return try {
-            val r = engine.ingest(profile, key, name, size, mtime, sha) { tmp: File ->
-                tmp.outputStream().use { fo -> copyExact(req.body, fo, size) }
+            // hashed while it streams in, then compared with the computer's own hash (end-to-end check)
+            val r = engine.ingestHashed(profile, key, name, size, mtime, sha) { tmp: File ->
+                tmp.outputStream().use { fo -> Hashing.copyHashing(req.body, fo, size) }
             }
             when (r) {
                 is IngestResult.Stored -> { listener.onStored(name, size); respond(out, 200, """{"status":"verified"}""") }

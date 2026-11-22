@@ -85,6 +85,8 @@ class TransferLoopTest {
         val wave = WaveCoordinator(engine, BackupTracker(ledger), noSignals, object : FreeUpAction { override fun requestFreeUp(auto: Boolean) = true }, silent)
         val loop = TransferLoop(engine, wave, ledger, cancelled = { n >= 10 }, onUpdate = { n = it.done })
         assertEquals(LoopEnd.CANCELLED, loop.run(DeviceProfile("d", "S", "Oppo"), phone, phone.entries()))
-        assertEquals(10, ledger.byState(ItemState.VERIFIED).size)
+        val saved = ledger.byState(ItemState.VERIFIED).size
+        assertTrue(saved in 10..13, "stops within the pipeline depth: $saved")
+        assertEquals(saved, loop.progress.stored, "every file already received is verified and counted, none lost")
     }
 }
