@@ -12,7 +12,6 @@ import java.net.SocketException
 import java.net.URLDecoder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLServerSocket
 
@@ -39,8 +38,9 @@ class ReceiverServer(
 
     private var server: ServerSocket? = null
     private var pool: ExecutorService? = null
-    private val badAuth = AtomicInteger(0)
-    @Volatile private var lockedUntil = 0L
+    /** Wrong-code attempts per sender address: one bad neighbour can't lock out your computer. */
+    private class Strikes(var count: Int = 0, var lockedUntil: Long = 0)
+    private val strikes = java.util.concurrent.ConcurrentHashMap<String, Strikes>()
     @Volatile var running = false; private set
 
     val localPort: Int get() = server?.localPort ?: -1
@@ -49,7 +49,7 @@ class ReceiverServer(
         val ss = sslContext.serverSocketFactory.createServerSocket(port, 16, bind) as SSLServerSocket
         ss.enabledProtocols = ss.supportedProtocols.filter { it == "TLSv1.3" || it == "TLSv1.2" }.toTypedArray()
         server = ss
-        val p = Executors.newFixedThreadPool(4)
+        val p = Executors.newFixedThreadPool(8)
         pool = p
         running = true
         Thread({
@@ -66,17 +66,20 @@ class ReceiverServer(
         pool?.shutdownNow()
     }
 
-    private class Req(val method: String, val path: String, val headers: Map<String, String>, val body: InputStream, val length: Long)
+    private class Req(val ip: String, val method: String, val path: String, val headers: Map<String, String>, val body: InputStream, val length: Long)
 
     private fun handle(sock: Socket) {
         sock.use { s ->
-            s.soTimeout = 120_000
+            s.soTimeout = 15_000 // handshake + first request must come quickly
             s.tcpNoDelay = true
+            val ip = s.inetAddress?.hostAddress ?: "?"
+            try { (s as? javax.net.ssl.SSLSocket)?.startHandshake() } catch (e: Exception) { return }
+            s.soTimeout = 60_000 // a live upload sends data far more often than this
             val input = BufferedInputStream(s.getInputStream(), 1 shl 16)
             val out = s.getOutputStream().buffered(1 shl 16)
             try {
                 while (running) {
-                    val req = readRequest(input) ?: return
+                    val req = readRequest(input, ip) ?: return
                     val keep = route(req, out)
                     out.flush()
                     if (!keep) return
@@ -98,9 +101,10 @@ class ReceiverServer(
         }
     }
 
-    private fun readRequest(i: InputStream): Req? {
-        val line = readLine(i) ?: return null
-        if (line.isEmpty()) return readRequest(i)
+    private fun readRequest(i: InputStream, ip: String): Req? {
+        var line = readLine(i) ?: return null
+        var blank = 0
+        while (line.isEmpty()) { if (++blank > 4) return null; line = readLine(i) ?: return null }
         val parts = line.split(' ')
         if (parts.size < 2) throw IllegalStateException("bad request line")
         val headers = HashMap<String, String>()
@@ -112,7 +116,7 @@ class ReceiverServer(
             if (headers.size > 64) throw IllegalStateException("too many headers")
         }
         val len = headers["content-length"]?.toLongOrNull() ?: 0L
-        return Req(parts[0], parts[1].substringBefore('?'), headers, BoundedInput(i, len), len)
+        return Req(ip, parts[0], parts[1].substringBefore('?'), headers, BoundedInput(i, len), len)
     }
 
     private fun respond(out: OutputStream, code: Int, body: String, keep: Boolean = true, type: String = "application/json") {
@@ -126,12 +130,17 @@ class ReceiverServer(
 
     private fun dec(s: String?) = s?.let { URLDecoder.decode(it, "UTF-8") }
 
+    private fun locked(req: Req) = (strikes[req.ip]?.lockedUntil ?: 0) > System.currentTimeMillis()
+
     private fun authed(req: Req): Boolean {
-        if (System.currentTimeMillis() < lockedUntil) return false
+        if (locked(req)) return false
         val h = req.headers["authorization"] ?: ""
         val ok = h.startsWith("Bearer ") && Pairing.constantTimeEquals(h.removePrefix("Bearer ").trim(), token)
-        if (!ok && badAuth.incrementAndGet() >= 8) { lockedUntil = System.currentTimeMillis() + 60_000; badAuth.set(0) }
-        if (ok) badAuth.set(0)
+        val st = strikes.getOrPut(req.ip) { Strikes() }
+        synchronized(st) {
+            if (ok) st.count = 0
+            else if (++st.count >= 8) { st.lockedUntil = System.currentTimeMillis() + 5 * 60_000; st.count = 0 }
+        }
         return ok
     }
 
@@ -141,7 +150,7 @@ class ReceiverServer(
     private fun route(req: Req, out: OutputStream): Boolean {
         if (req.path == "/api/hello") { drain(req); respond(out, 200, """{"app":"PixelFerry","v":1}"""); return true }
         if (!authed(req)) {
-            respond(out, if (System.currentTimeMillis() < lockedUntil) 429 else 401, """{"error":"bad pairing code"}""", keep = false)
+            respond(out, if (locked(req)) 429 else 401, """{"error":"bad pairing code"}""", keep = false)
             return false
         }
         return when (req.method to req.path) {
@@ -166,7 +175,12 @@ class ReceiverServer(
         return req.body.readBytes().toString(Charsets.UTF_8)
     }
 
-    private fun device(req: Req): String = dec(req.headers["x-device-id"]) ?: throw IllegalStateException("no device id")
+    /** Computers live in their own namespace: they can never touch a USB phone's records. */
+    private fun device(req: Req): String {
+        val raw = dec(req.headers["x-device-id"]) ?: throw IllegalStateException("no device id")
+        require(raw.length in 4..80 && raw.all { it.isLetterOrDigit() || it == '-' }) { "bad device id" }
+        return "pc:$raw"
+    }
 
     private fun check(req: Req, out: OutputStream) {
         val dev = device(req)
@@ -174,7 +188,7 @@ class ReceiverServer(
         for (line in bodyText(req).lineSequence()) {
             if (line.isBlank()) continue
             val key = dec(line.substringBefore('\t'))!!
-            val item = ledger.find(dev, key)
+            val item = engine.alreadyHave(dev, key)
             if (item != null) sb.append(line.substringBefore('\t')).append('\t').append(item.state.name).append('\n')
         }
         respond(out, 200, sb.toString(), type = "text/plain")
@@ -193,7 +207,7 @@ class ReceiverServer(
         if (size != req.length) return bad(out, req)
         if (!MediaTypes.isMedia(name)) { drain(req); respond(out, 422, """{"error":"not a photo/video"}"""); return true }
 
-        val profile = ledger.device(dev) ?: DeviceProfile(dev, owner, label).also { ledger.saveDevice(it) }
+        val profile = DeviceProfile(dev, owner, label).also { if (ledger.device(dev) != it) ledger.saveDevice(it) }
         engine.alreadyHave(dev, key)?.let { drain(req); respond(out, 200, """{"status":"already","state":"${it.state}"}"""); return true }
         if (!engine.hasRoomFor(size)) {
             listener.onNeedSpace(size)

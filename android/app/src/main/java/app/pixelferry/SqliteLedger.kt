@@ -56,7 +56,8 @@ class SqliteLedger(ctx: Context) : SQLiteOpenHelper(ctx, "ledger.db", null, 1), 
         }
 
     override fun find(deviceKey: String, itemKey: String) = query("device=? AND key=?", deviceKey, itemKey).firstOrNull()
-    override fun findByHash(sha256: String) = query("sha=? AND state<>'DUPLICATE'", sha256).firstOrNull()
+    override fun findByHash(sha256: String) = query("sha=? AND state NOT IN ('DUPLICATE','MISSING_UNKNOWN')", sha256).firstOrNull()
+    override fun remove(id: Long) { writableDatabase.delete("items", "id=?", arrayOf(id.toString())) }
     override fun get(id: Long) = query("id=?", id.toString()).firstOrNull()
     override fun byState(state: ItemState) = query("state=?", state.name)
     override fun forDevice(deviceKey: String) = query("device=?", deviceKey)

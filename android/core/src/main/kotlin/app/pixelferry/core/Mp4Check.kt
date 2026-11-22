@@ -26,7 +26,7 @@ object Mp4Check {
                     raf.readFully(hdr, 8, 8)
                     size = 0
                     for (i in 8 until 16) size = (size shl 8) or (hdr[i].toLong() and 0xff)
-                } else if (size == 0L) size = len - pos // box runs to end of file
+                } else if (size == 0L) return false // "runs to end of file" can't prove completeness
                 if (size < 8 || pos + size > len) return false
                 if (type == "moov") moov = true
                 pos += size; boxes++

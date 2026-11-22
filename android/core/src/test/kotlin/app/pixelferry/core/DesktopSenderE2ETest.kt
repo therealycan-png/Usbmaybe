@@ -91,7 +91,7 @@ class DesktopSenderE2ETest {
             val (badExit, badOut) = py(home, "send", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", bad, "--owner", "Shawn", "--device", "Laptop")
             assertNotEquals(0, badExit); assertTrue(badOut.contains("wrong pairing code"))
             // wrong certificate pin (someone pretending to be the Pixel) is refused before any data/token is sent
-            val (pinExit, pinOut) = py(home, "send", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", Pairing.code(token, "ZZZZZZZZ"), "--owner", "S", "--device", "L")
+            val (pinExit, pinOut) = py(home, "send", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", Pairing.code(token, "Z".repeat(16)), "--owner", "S", "--device", "L")
             assertNotEquals(0, pinExit); assertTrue(pinOut.contains("NOT your Pixel"))
             assertTrue(ledger.byState(ItemState.VERIFIED).isEmpty())
 

@@ -4,11 +4,11 @@ PixelFerry desktop sender (Windows / Linux / macOS). Python 3.8+, no extra packa
 
 Send every photo/video in one or more folders to your Pixel XL, full quality:
 
-    python pixelferry_send.py send "D:\\Photos" --to 192.168.1.20 --code K7QM-2XHD-9F3B-WPRA --owner Shawn --device Laptop
+    python pixelferry_send.py send "D:\\Photos" --to 192.168.1.20 --code K7QM-2XHD-9F3B-WPRA-8C1N-ZT4E --owner Shawn --device Laptop
 
 Later, once Google Photos has backed them up, delete them from this computer:
 
-    python pixelferry_send.py delete-backed-up "D:\\Photos" --to 192.168.1.20 --code K7QM-2XHD-9F3B-WPRA
+    python pixelferry_send.py delete-backed-up "D:\\Photos" --to 192.168.1.20 --code K7QM-2XHD-9F3B-WPRA-8C1N-ZT4E
 
 Safe to stop (Ctrl+C) and re-run any time: finished files are skipped.
 """
@@ -58,8 +58,8 @@ def base32(data):
 
 def parse_code(code):
     c = code.replace("-", "").replace(" ", "").upper().replace("O", "0").replace("I", "1").replace("L", "1")
-    if len(c) != 16 or any(ch not in ALPHABET for ch in c):
-        sys.exit("That pairing code doesn't look right. It's 16 characters like K7QM-2XHD-9F3B-WPRA.")
+    if len(c) != 24 or any(ch not in ALPHABET for ch in c):
+        sys.exit("That pairing code doesn't look right. It's 24 characters like K7QM-2XHD-9F3B-WPRA-8C1N-ZT4E.")
     return c[:8], c[8:]
 
 
@@ -82,8 +82,9 @@ def device_id():
     return i
 
 
-def item_key(path):
-    return os.path.normcase(os.path.abspath(path))
+def item_key(path, st):
+    """Path + size + modified time: an edited file at the same path is a new version and gets sent."""
+    return f"{os.path.abspath(path)}|{st.st_size}|{int(st.st_mtime)}"
 
 
 def sha256_file(path):
@@ -110,7 +111,7 @@ class HashCache:
         self.dirty = 0
 
     def get(self, path, st):
-        k = item_key(path)
+        k = os.path.abspath(path)
         e = self.d.get(k)
         if e and e[0] == st.st_size and e[1] == int(st.st_mtime):
             return e[2]
@@ -147,7 +148,7 @@ class Pixel:
         conn = http.client.HTTPSConnection(self.host, self.port, context=ctx, timeout=self.timeout, blocksize=CHUNK)
         conn.connect()
         der = conn.sock.getpeercert(binary_form=True)
-        got = base32(hashlib.sha256(der).digest())[:8]
+        got = base32(hashlib.sha256(der).digest())[:len(self.pin)]
         if got != self.pin:
             conn.close()
             sys.exit("STOPPED: the device at that address is NOT your Pixel (security check failed). "
@@ -179,7 +180,7 @@ class Pixel:
         if r.status == 401:
             sys.exit("STOPPED: wrong pairing code. Turn 'Receive from computer' off and on in the Pixel app for a new one.")
         if r.status == 429:
-            sys.exit("STOPPED: too many wrong codes; the Pixel locked receiving for a minute.")
+            sys.exit("STOPPED: too many wrong codes from this computer; the Pixel blocks it for 5 minutes.")
         return r.status, data.decode("utf-8", "replace")
 
     def status(self):
@@ -251,12 +252,12 @@ def cmd_send(a):
 
     done = set()
     for i in range(0, len(files), 500):
-        body = "".join(f"{quote(item_key(p))}\t{st.st_size}\n" for p, st in files[i:i + 500]).encode()
+        body = "".join(f"{quote(item_key(p, st))}\t{st.st_size}\n" for p, st in files[i:i + 500]).encode()
         s, d = with_retries(lambda: px.request("POST", "/api/check", body=body), "check")
         for line in d.splitlines():
             if "\t" in line:
                 done.add(unquote(line.split("\t")[0]))
-    todo = [(p, st) for p, st in files if item_key(p) not in done]
+    todo = [(p, st) for p, st in files if item_key(p, st) not in done]
     print(f"Already on Pixel: {len(files) - len(todo)}. To send now: {len(todo)}.")
     if a.dry_run:
         return
@@ -274,12 +275,22 @@ def cmd_send(a):
                     with open(p, "rb") as f:
                         headers = {
                             "Content-Length": str(st.st_size),
-                            "X-Key": quote(item_key(p)), "X-Name": quote(os.path.basename(p)),
+                            "X-Key": quote(item_key(p, st)), "X-Name": quote(os.path.basename(p)),
                             "X-Size": str(st.st_size), "X-Sha256": sha, "X-Mtime": str(int(st.st_mtime * 1000)),
                             "X-Owner": quote(a.owner), "X-Device": quote(a.device),
                         }
                         return px.request("PUT", "/api/upload", body=f, headers=headers)
-                s, d = with_retries(put, os.path.basename(p))
+                st_now = with_retries(px.status, "status") if n == 1 or n % 25 == 0 or st.st_size > 200 * 1024 * 1024 else None
+                if st_now and st_now["free"] - st_now["reserve"] < st.st_size:
+                    wait_for_room(px, st.st_size)
+                try:
+                    s, d = put()
+                except (OSError, http.client.HTTPException, socket.timeout):
+                    # connection dropped mid-upload: usually the Pixel filled up and hung up, or Wi-Fi blipped
+                    px.close()
+                    time.sleep(3)
+                    wait_for_room(px, st.st_size)
+                    s, d = with_retries(put, os.path.basename(p))
                 if s == 507:  # Pixel full: wait for the Google Photos wave, doesn't count as a failure
                     wait_for_room(px, st.st_size)
                     continue
@@ -317,7 +328,7 @@ def cmd_send(a):
 def cmd_delete(a):
     px = Pixel(a.to, a.port, a.code)
     files, _ = collect(a.folders)
-    by_key = {item_key(p): (p, st) for p, st in files}
+    by_key = {item_key(p, st): (p, st) for p, st in files}
     s, d = with_retries(lambda: px.request("POST", "/api/deletable"), "deletable")
     candidates = []
     for line in d.splitlines():

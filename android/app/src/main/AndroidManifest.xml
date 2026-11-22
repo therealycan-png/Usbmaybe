@@ -25,7 +25,8 @@
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
-            android:launchMode="singleTask">
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -38,7 +39,7 @@
                 android:resource="@xml/usb_devices" />
         </activity>
 
-        <activity android:name=".ui.PickActivity" android:exported="false" />
+        <activity android:name=".ui.PickActivity" android:exported="false" android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <service android:name=".TransferService" android:exported="false" />
 

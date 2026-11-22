@@ -9,6 +9,7 @@ import android.mtp.MtpDevice
 import android.mtp.MtpObjectInfo
 import android.os.ParcelFileDescriptor
 import app.pixelferry.core.MediaTypes
+import app.pixelferry.core.SourceEntry
 import app.pixelferry.core.UNKNOWN_SIZE
 import java.io.File
 import java.io.IOException
@@ -28,7 +29,8 @@ class MtpSource private constructor(
     override val kind = "usb"
 
     private val info = mtp.deviceInfo
-    private val serial = info?.serialNumber?.takeIf { it.isNotBlank() } ?: usb.serialNumberSafe() ?: usb.deviceName
+    private val serial = info?.serialNumber?.takeIf { it.isNotBlank() } ?: usb.serialNumberSafe()?.takeIf { it.isNotBlank() }
+        ?: "noserial-${info?.model ?: usb.productName}" // stable across re-plugs (deviceName is not)
     override val deviceKey = "usb:${usb.vendorId}:${usb.productId}:$serial"
     override val suggestedLabel: String = listOfNotNull(info?.model?.takeIf { it.isNotBlank() }, usb.productName)
         .firstOrNull() ?: "USB device"
@@ -38,24 +40,35 @@ class MtpSource private constructor(
 
     private fun UsbDevice.serialNumberSafe(): String? = try { serialNumber } catch (_: SecurityException) { null }
 
+    /** Items/folders that didn't answer during the last listing (device locked mid-way?). */
+    @Volatile var lastWarnings = 0; private set
+
+    private fun <T> retry(f: () -> T?): T? = f() ?: run { Thread.sleep(400); f() } ?: run { Thread.sleep(1500); f() }
+
     override fun list(progress: (Int) -> Unit): List<SourceEntry> = synchronized(mtp) {
         val out = ArrayList<SourceEntry>()
-        val storages = mtp.storageIds ?: throw IOException("Device is locked or not in file-transfer mode")
+        var warnings = 0
+        val storages = retry { mtp.storageIds?.takeIf { it.isNotEmpty() } }
+            ?: throw IOException("The device is locked or hasn't allowed access yet. Unlock it and tap Trust / Allow (iPhone) or choose File transfer (Android).")
         for (storage in storages) {
-            val before = out.size
+            var rootCount = -1
             // Breadth-first walk. 0xFFFFFFFF = "root of this storage" in PTP/MTP.
             val queue = ArrayDeque<Pair<Int, String>>()
             queue += ROOT to ""
             val seen = HashSet<Int>()
             while (queue.isNotEmpty()) {
                 val (parent, path) = queue.removeFirst()
-                val handles = mtp.getObjectHandles(storage, 0, parent) ?: continue
+                val handles = retry { mtp.getObjectHandles(storage, 0, parent) }
+                if (handles == null) { warnings++; continue }
+                if (parent == ROOT) rootCount = handles.size
                 for (h in handles) {
                     if (!seen.add(h)) continue
-                    val oi = mtp.getObjectInfo(h) ?: continue
+                    val oi = retry { mtp.getObjectInfo(h) }
+                    if (oi == null) { warnings++; continue }
                     val name = oi.name ?: continue
                     if (oi.format == MtpConstants.FORMAT_ASSOCIATION) {
-                        if (!name.startsWith(".")) queue += h to (if (path.isEmpty()) name else "$path/$name")
+                        val sub = if (path.isEmpty()) name else "$path/$name"
+                        if (!name.startsWith(".") && sub !in SKIP_DIRS) queue += h to sub
                         continue
                     }
                     if (!MediaTypes.isMedia(name)) continue
@@ -68,8 +81,9 @@ class MtpSource private constructor(
                     if (out.size % 100 == 0) progress(out.size)
                 }
             }
-            if (out.size == before) flatList(storage, out) // some devices only answer "all objects" (parent 0)
+            if (rootCount == 0) flatList(storage, out) // some devices only answer "all objects" (parent 0)
         }
+        lastWarnings = warnings
         progress(out.size)
         out
     }
@@ -97,11 +111,34 @@ class MtpSource private constructor(
     }
 
     override fun copyTo(entry: SourceEntry, dest: File) = synchronized(mtp) {
+        if (entry.size == UNKNOWN_SIZE && copyChunked64(entry, dest)) return@synchronized
         val pfd = ParcelFileDescriptor.open(dest,
             ParcelFileDescriptor.MODE_WRITE_ONLY or ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_TRUNCATE)
         pfd.use {
             if (!mtp.importFile(entry.ref.toInt(), it)) throw IOException("Device stopped sending ${entry.name} (unplugged or locked?)")
         }
+    }
+
+    /**
+     * Files over 4 GB: Android phones support 64-bit partial reads, so read in chunks to the end.
+     * @return false if the device doesn't support it (iPhone); then the normal path is tried and
+     *         the size-free MP4 check decides.
+     */
+    private fun copyChunked64(entry: SourceEntry, dest: File): Boolean {
+        val h = entry.ref.toInt()
+        val buf = ByteArray(CHUNK)
+        dest.outputStream().buffered(CHUNK).use { o ->
+            var off = 0L
+            while (true) {
+                val n = try { mtp.getPartialObject64(h, off, CHUNK.toLong(), buf) } catch (e: IOException) {
+                    if (off == 0L) return false else throw e
+                }
+                if (n <= 0) break
+                o.write(buf, 0, n.toInt()); off += n
+                if (n < CHUNK) break
+            }
+        }
+        return true
     }
 
     override fun delete(entry: SourceEntry): Boolean = synchronized(mtp) {
@@ -124,6 +161,9 @@ class MtpSource private constructor(
 
     companion object {
         private const val ROOT = -1 // 0xFFFFFFFF
+        private const val CHUNK = 1 shl 20
+        /** App-private and system folders on Android phones: no camera media, thousands of tiny files. */
+        private val SKIP_DIRS = setOf("Android/data", "Android/obb", "Android/obj", ".thumbnails", "DCIM/.thumbnails")
 
         /** @return null if the device does not speak MTP/PTP (e.g. it is in charge-only mode). */
         fun open(usbManager: UsbManager, device: UsbDevice): MtpSource? {

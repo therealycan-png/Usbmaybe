@@ -31,9 +31,10 @@ object Hub {
     val engine by lazy { IngestEngine(storage, ledger) }
     val tracker by lazy {
         val prefs = App.instance.getSharedPreferences("pf", 0)
-        BackupTracker(ledger, onWindowChanged = { prefs.edit().putLong("windowUntil", it).apply() }).also {
-            it.restoreWindow(prefs.getLong("windowUntil", 0)) // survives app restarts
-        }
+        BackupTracker(ledger,
+            onWindowChanged = { prefs.edit().putLong("windowUntil", it).apply() },
+            storageReadable = { storage.isReadable() },
+            foundElsewhere = { name -> storage.existsElsewhere(name) })
     }
     val wave by lazy { WaveCoordinator(engine, tracker, PhotosWatcher.Signals, FreeUpController, Notifs) }
 

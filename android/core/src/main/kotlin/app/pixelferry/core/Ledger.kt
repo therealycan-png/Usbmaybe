@@ -40,6 +40,8 @@ interface Ledger {
     fun get(id: Long): Item?
     fun insert(item: Item): Item
     fun setState(id: Long, state: ItemState)
+    /** Only used to replace a MISSING_UNKNOWN row when the file is sent again. */
+    fun remove(id: Long)
     fun byState(state: ItemState): List<Item>
     fun forDevice(deviceKey: String): List<Item>
 
@@ -50,6 +52,16 @@ interface Ledger {
             it.state == ItemState.BACKED_UP || it.state == ItemState.SOURCE_DELETED
         } ?: false
         else -> false
+    }
+
+    /**
+     * Is this file really finished? A copy that vanished without Google freeing it is NOT,
+     * and neither is a duplicate whose original vanished: those get sent again.
+     */
+    fun isDone(item: Item): Boolean = when (item.state) {
+        ItemState.MISSING_UNKNOWN -> false
+        ItemState.DUPLICATE -> item.duplicateOf?.let { get(it) }?.let { isDone(it) } ?: false
+        else -> true
     }
 
     fun deletableFor(deviceKey: String): List<Item> = forDevice(deviceKey).filter { isSafeToDeleteFromSource(it) }
@@ -66,7 +78,7 @@ class MemoryLedger : Ledger {
     @Synchronized override fun find(deviceKey: String, itemKey: String) =
         items.values.firstOrNull { it.deviceKey == deviceKey && it.itemKey == itemKey }
     @Synchronized override fun findByHash(sha256: String) =
-        items.values.firstOrNull { it.sha256 == sha256 && it.state != ItemState.DUPLICATE }
+        items.values.firstOrNull { it.sha256 == sha256 && it.state != ItemState.DUPLICATE && it.state != ItemState.MISSING_UNKNOWN }
     @Synchronized override fun get(id: Long) = items[id]
     @Synchronized override fun insert(item: Item): Item {
         val i = item.copy(id = next++); items[i.id] = i; return i
@@ -74,6 +86,7 @@ class MemoryLedger : Ledger {
     @Synchronized override fun setState(id: Long, state: ItemState) {
         items[id]?.let { items[id] = it.copy(state = state, updatedAtMs = System.currentTimeMillis()) }
     }
+    @Synchronized override fun remove(id: Long) { items.remove(id) }
     @Synchronized override fun byState(state: ItemState) = items.values.filter { it.state == state }
     @Synchronized override fun forDevice(deviceKey: String) = items.values.filter { it.deviceKey == deviceKey }
 }

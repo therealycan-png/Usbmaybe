@@ -35,9 +35,8 @@ class PhotosWatcher : NotificationListenerService() {
 
     private fun looksLikeBackup(n: Notification): Boolean {
         val e = n.extras
-        if (e.getInt(Notification.EXTRA_PROGRESS_MAX, 0) > 0 || e.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE)) return true
         val t = (text(n) ?: "").lowercase()
-        return KEYWORDS.any { it in t } || (n.flags and Notification.FLAG_ONGOING_EVENT != 0)
+        return KEYWORDS.any { it in t }
     }
 
     object Signals : BackupSignals {

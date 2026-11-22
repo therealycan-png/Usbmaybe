@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import app.pixelferry.core.MediaTypes
+import app.pixelferry.core.SourceEntry
 import java.io.File
 import java.io.IOException
 

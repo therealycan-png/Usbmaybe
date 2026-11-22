@@ -4,15 +4,19 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 
 /**
- * Pairing code shown on the Pixel, typed on the computer:  K7QM-2XHD-9F3B-WPRA
- *   first 8 chars  = secret token (40 bits, random each time receiving is turned on)
- *   last 8 chars   = first 40 bits of the Pixel's TLS certificate SHA-256
+ * Pairing code shown on the Pixel, typed on the computer:  K7QM-2XHD-9F3B-WPRA-8C1N-ZT4E
+ *   first 8 chars  = secret token (40 bits, random each time receiving is turned on;
+ *                    online guessing is rate-limited per address)
+ *   last 16 chars  = first 80 bits of the Pixel's TLS certificate SHA-256
+ *                    (forging a certificate that matches would take ~2^80 work)
  * The computer refuses to send anything unless the certificate matches, so a
  * stranger on the same Wi-Fi can neither read the photos nor pretend to be the Pixel.
  */
 object Pairing {
     private const val ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ" // Crockford base32
     private val rng = SecureRandom()
+    const val TOKEN_CHARS = 8
+    const val PIN_CHARS = 16
 
     fun base32(bytes: ByteArray): String {
         val sb = StringBuilder()
@@ -28,7 +32,7 @@ object Pairing {
     fun newToken(): String { val b = ByteArray(5); rng.nextBytes(b); return base32(b) }
 
     fun certPin(certDer: ByteArray): String =
-        base32(MessageDigest.getInstance("SHA-256").digest(certDer)).substring(0, 8)
+        base32(MessageDigest.getInstance("SHA-256").digest(certDer)).substring(0, PIN_CHARS)
 
     fun code(token: String, pin: String): String {
         val s = token + pin

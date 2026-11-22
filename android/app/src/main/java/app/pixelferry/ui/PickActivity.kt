@@ -24,7 +24,7 @@ import app.pixelferry.TransferService
 import app.pixelferry.TransferService.Companion.fmt
 import app.pixelferry.core.DeviceProfile
 import app.pixelferry.core.MediaTypes
-import app.pixelferry.sources.SourceEntry
+import app.pixelferry.core.SourceEntry
 import java.io.File
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -46,6 +46,9 @@ class PickActivity : Activity() {
     private val label by lazy { EditText(this).apply { hint = "Which device? e.g. iPhone13" } }
 
     private var mode = 0 // 0 all, 1 dates, 2 folders, 3 grid
+    private var tooBigAccepted = false
+    private var warningsAccepted = false
+    private var listWarnings = 0
     private var from: Long? = null
     private var until: Long? = null
     private val folders = HashSet<String>()
@@ -63,7 +66,8 @@ class PickActivity : Activity() {
                 runOnUiThread { body.removeAllViews(); body.add(p("Couldn't read the device: ${e.message}\n\nUnlock it / choose File transfer, then try again.")) }
                 return@thread
             }
-            val have = Hub.ledger.keysFor(s.deviceKey)
+            val have = Hub.ledger.forDevice(s.deviceKey).filter { Hub.ledger.isDone(it) }.map { it.itemKey }.toSet()
+            listWarnings = (s as? app.pixelferry.sources.MtpSource)?.lastWarnings ?: 0
             runOnUiThread { entries = list; done = have; title = "Send from ${s.suggestedLabel}"; build() }
         }
     }
@@ -157,6 +161,8 @@ class PickActivity : Activity() {
         val g = GridView(this).apply {
             numColumns = 4; verticalSpacing = dp(2); horizontalSpacing = dp(2)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(480))
+            // let the grid scroll inside the page
+            setOnTouchListener { v, _ -> v.parent.requestDisallowInterceptTouchEvent(true); false }
         }
         val adapter = object : BaseAdapter() {
             override fun getCount() = sorted.size
@@ -211,15 +217,40 @@ class PickActivity : Activity() {
         val o = owner.text.toString().trim(); val l = label.text.toString().trim()
         if (o.isEmpty() || l.isEmpty()) { owner.error = if (o.isEmpty()) "Needed for the divider" else null; label.error = if (l.isEmpty()) "Needed" else null; return }
         if (sel.isEmpty()) { summary.text = "Nothing selected."; return }
+        if (checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            summary.text = "First allow 'Save photos to the Pixel' in the setup checklist."; return
+        }
+        if (!getSharedPreferences("pf", 0).getBoolean("qualityOriginal", false)) {
+            summary.text = "First confirm Google Photos is set to 'Original quality' (setup checklist), so nothing gets compressed."; return
+        }
+        val tooBig = sel.filter { it.size > GOOGLE_MAX_VIDEO }
+        val sendable = sel - tooBig.toSet()
+        if (tooBig.isNotEmpty() && !tooBigAccepted) {
+            android.app.AlertDialog.Builder(this).setTitle("${tooBig.size} videos are too big for Google Photos")
+                .setMessage("Google Photos can't back up videos over 10 GB, so these stay on the device and are never offered for deletion:\n\n" +
+                    tooBig.take(8).joinToString("\n") { "• ${it.name} (${fmt(it.size)})" } + "\n\nKeep them on a computer or drive.")
+                .setPositiveButton("Send the rest") { _, _ -> tooBigAccepted = true; start(sel) }
+                .setNegativeButton("Cancel", null).show()
+            return
+        }
+        if (listWarnings > 0 && !warningsAccepted) {
+            android.app.AlertDialog.Builder(this).setTitle("Some folders couldn't be read")
+                .setMessage("$listWarnings items or folders didn't answer (the device may have locked). Keep it unlocked and go back and open it again to see everything, or send what was found now.")
+                .setPositiveButton("Send what was found") { _, _ -> warningsAccepted = true; start(sel) }
+                .setNegativeButton("Cancel", null).show()
+            return
+        }
         if (Hub.run.active) { summary.text = "Another transfer is running."; return }
         val prof = DeviceProfile(s.deviceKey, o, l)
         Hub.ledger.saveDevice(prof)
         getSharedPreferences("pf", 0).edit().putString("lastOwner", o).apply()
-        selFile().writeText(sel.joinToString("\n") { it.itemKey })
-        TransferService.pendingJob = TransferService.Job(s, prof, sel)
+        selFile().writeText(sendable.joinToString("\n") { it.itemKey })
+        TransferService.pendingJob = TransferService.Job(s, prof, sendable)
         TransferService.send(this, TransferService.ACTION_RUN)
         finish()
     }
 
     override fun onDestroy() { loader.shutdownNow(); super.onDestroy() }
+
+    companion object { const val GOOGLE_MAX_VIDEO = 10L * 1024 * 1024 * 1024 }
 }

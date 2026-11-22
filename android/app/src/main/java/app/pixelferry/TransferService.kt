@@ -12,16 +12,15 @@ import android.os.BatteryManager
 import android.os.IBinder
 import android.os.PowerManager
 import app.pixelferry.core.DeviceProfile
-import app.pixelferry.core.IngestResult
 import app.pixelferry.core.ItemState
-import app.pixelferry.core.NotEnoughSpace
+import app.pixelferry.core.LoopEnd
 import app.pixelferry.core.Pairing
 import app.pixelferry.core.ReceiverServer
-import app.pixelferry.core.VerifyFailed
+import app.pixelferry.core.TransferLoop
+import app.pixelferry.core.WaveCoordinator
 import app.pixelferry.sources.MediaSource
 import app.pixelferry.sources.MtpSource
-import app.pixelferry.sources.SourceEntry
-import java.io.IOException
+import app.pixelferry.core.SourceEntry
 
 /**
  * Runs transfers in the background (screen can be off), keeps the CPU awake,
@@ -64,36 +63,46 @@ class TransferService : Service() {
             ACTION_DELETE -> pendingDelete?.let { src -> pendingDelete = null; launch { runDelete(src) } }
             ACTION_FINISH -> launch { finalWave() }
             ACTION_STOP -> { cancel = true }
-            ACTION_RECV_ON -> startReceiver()
-            ACTION_RECV_OFF -> { stopReceiver(); maybeStop() }
+            ACTION_RECV_ON -> Thread { startReceiver() }.start()
+            ACTION_RECV_OFF -> stopReceiver()
         }
+        main.post { maybeStop() }
         return START_NOT_STICKY
     }
 
     private fun launch(block: () -> Unit) {
         if (worker?.isAlive == true) return
         cancel = false
-        acquireLocks()
-        worker = Thread({
+        val t = Thread({
             try { block() } catch (e: Exception) {
                 Hub.run.title = "Stopped"; Hub.run.detail = "Error: ${e.message}"; Hub.run.errors += e.toString()
             } finally {
                 Hub.run.active = false
-                releaseLocks(); updateNotif(force = true); maybeStop()
+                updateNotif(force = true)
+                main.post { worker = null; syncLocks(); maybeStop() }
             }
-        }, "pf-job").also { it.start() }
+        }, "pf-job")
+        worker = t
+        syncLocks()
+        t.start()
     }
+
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private fun busy() = worker?.isAlive == true || receiver != null
 
     private fun maybeStop() {
-        if (worker?.isAlive != true && receiver == null) { stopForeground(true); stopSelf() }
+        if (!busy()) { @Suppress("DEPRECATION") stopForeground(true); stopSelf() }
     }
 
-    private fun acquireLocks() {
-        val pm = getSystemService(PowerManager::class.java)
-        wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pixelferry:run").apply { setReferenceCounted(false); acquire() }
+    /** One wake lock, held exactly while a job or the receiver is active. */
+    @Synchronized private fun syncLocks() {
+        val w = wake ?: getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pixelferry:run").apply { setReferenceCounted(false) }.also { wake = it }
+        if (busy() && !w.isHeld) w.acquire() else if (!busy() && w.isHeld) w.release()
     }
 
-    private fun releaseLocks() { wake?.let { if (it.isHeld) it.release() }; wake = null }
+    private fun releaseLocks() { wake?.let { if (it.isHeld) it.release() } }
 
     private fun updateNotif(force: Boolean = false) {
         val now = System.currentTimeMillis()
@@ -111,51 +120,29 @@ class TransferService : Service() {
 
     private fun runJob(job: Job) {
         val r = Hub.run
-        val src = job.source
-        val entries = job.entries.sortedBy { it.dateMs }
         r.errors.clear()
         r.active = true; r.title = "Transferring"; r.detail = "From ${job.profile.owner}'s ${job.profile.label}"
-        r.total = entries.size; r.done = 0; r.bytesTotal = entries.sumOf { it.approxSize }; r.bytesDone = 0
-        r.duplicates = 0; r.failed = 0; r.skipped = 0; r.startedAt = System.currentTimeMillis()
-        Hub.engine.cleanTemp()
-        val already = Hub.ledger.keysFor(job.profile.deviceKey)
-
-        for (e in entries) {
-            if (cancel) break
-            if (e.itemKey in already) { r.skipped++; r.done++; r.bytesDone += e.approxSize; continue }
-            batteryGuard()
-            if (!Hub.engine.hasRoomFor(e.approxSize) && !Hub.wave.awaitRoom(e.approxSize, { cancel })) break
-            var attempt = 0
-            while (!cancel) {
-                try {
-                    r.detail = "Copying ${e.name} (${fmt(e.approxSize)})"
-                    updateNotif()
-                    val res = Hub.engine.ingest(job.profile, e.itemKey, e.name, e.size, e.dateMs, null) { src.copyTo(e, it) }
-                    if (res is IngestResult.Duplicate) r.duplicates++
-                    Hub.wave.fileStored()
-                    break
-                } catch (ex: NotEnoughSpace) {
-                    if (!Hub.wave.awaitRoom(e.approxSize, { cancel })) break
-                } catch (ex: VerifyFailed) {
-                    if (++attempt >= 3) { r.failed++; r.errors += "${e.name}: ${ex.message}"; break }
-                } catch (ex: IOException) {
-                    if (!src.isConnected()) {
-                        r.title = "Paused: cable unplugged"
-                        r.detail = "Plug it back in and tap Resume. Finished files are kept and won't be copied again."
-                        Notifs.alert(this, r.title, r.detail)
-                        return
-                    }
-                    if (++attempt >= 3) { r.failed++; r.errors += "${e.name}: ${ex.message}"; break }
-                    Thread.sleep(2000)
-                }
+        r.done = 0; r.bytesDone = 0; r.duplicates = 0; r.failed = 0; r.skipped = 0; r.startedAt = System.currentTimeMillis()
+        val loop = TransferLoop(Hub.engine, Hub.wave, Hub.ledger, cancelled = { cancel }, beforeEach = { batteryGuard() },
+            onUpdate = { p ->
+                r.total = p.total; r.bytesTotal = p.bytesTotal; r.done = p.done; r.bytesDone = p.bytesDone
+                r.duplicates = p.duplicates; r.skipped = p.skipped; r.failed = p.failed
+                if (Hub.wave.phase == WaveCoordinator.Phase.RUNNING) { r.title = "Transferring"; r.detail = "Copying ${p.current}" }
+                p.errors.lastOrNull()?.let { if (it !in r.errors) r.errors += it }
+                updateNotif()
+            })
+        val end = loop.run(job.profile, job.source, job.entries)
+        val p = loop.progress
+        when (end) {
+            LoopEnd.CANCELLED -> { r.title = "Stopped"; r.detail = "Tap Start again any time: finished files are skipped."; return }
+            LoopEnd.UNPLUGGED -> {
+                r.title = "Paused: cable unplugged"
+                r.detail = "Plug it back in, open the device and tap 'Resume last transfer'. Finished files are kept and won't be copied again."
+                Notifs.alert(this, r.title, r.detail); return
             }
-            r.done++; r.bytesDone += e.approxSize
-            updateNotif()
+            LoopEnd.FINISHED -> {}
         }
-        if (cancel) { r.title = "Stopped"; r.detail = "Tap Start again any time: finished files are skipped."; return }
-
-        val summary = "${r.done - r.skipped - r.failed - r.duplicates} new, ${r.duplicates} duplicates skipped, " +
-            "${r.skipped} already done, ${r.failed} failed."
+        val summary = "${p.stored} new, ${p.duplicates} duplicates skipped, ${p.skipped} already done, ${p.failed} failed."
         finalWave(summary, job.profile)
     }
 
@@ -218,6 +205,14 @@ class TransferService : Service() {
     private var waveThread: Thread? = null
 
     private fun startReceiver() {
+        try { startReceiverInner() } catch (e: Exception) {
+            receiver?.stop(); receiver = null; pairingCode = null
+            Hub.run.title = "Couldn't start receiving"; Hub.run.detail = "${e.message}. Turn the switch off and on, or restart the Pixel."
+            main.post { syncLocks(); maybeStop() }
+        }
+    }
+
+    @Synchronized private fun startReceiverInner() {
         if (receiver != null) return
         val token = Pairing.newToken()
         val srv = ReceiverServer(Hub.engine, Hub.ledger, TlsIdentity.sslContext(), token, object : ReceiverServer.Listener {
@@ -236,7 +231,7 @@ class TransferService : Service() {
         srv.start()
         receiver = srv
         pairingCode = Pairing.code(token, Pairing.certPin(TlsIdentity.certDer()))
-        acquireLocks()
+        main.post { syncLocks() }
         @Suppress("DEPRECATION")
         wifiLock = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager)
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "pixelferry:recv").apply { acquire() }
@@ -247,7 +242,7 @@ class TransferService : Service() {
     private fun stopReceiver() {
         receiver?.stop(); receiver = null; pairingCode = null
         wifiLock?.let { if (it.isHeld) it.release() }; wifiLock = null
-        if (worker?.isAlive != true) releaseLocks()
+        syncLocks()
     }
 
     companion object {

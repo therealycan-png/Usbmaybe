@@ -35,11 +35,12 @@ object Notifs : WaveNotifier {
     }
 
     /** Manual fallback: one tap opens Google Photos; the free-up window is already open. */
+    /** Manual fallback. Tapping it goes through PixelFerry first, which opens the short free-up window. */
     fun askFreeUp(ctx: Context) {
-        val launch = ctx.packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)
-        val pi = if (launch != null) PendingIntent.getActivity(ctx, 1, launch, PendingIntent.FLAG_IMMUTABLE) else openApp(ctx)
+        val pi = PendingIntent.getActivity(ctx, 1, Intent(ctx, MainActivity::class.java)
+            .setAction(MainActivity.ACTION_FREE_UP_NOW).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
         alert(ctx, "Tap: Free up space in Google Photos",
-            "Pixel is full and Google Photos looks done backing up. Open Google Photos > your profile picture > " +
+            "Google Photos looks done backing up. Tap here, then in Google Photos tap your profile picture > " +
                 "Free up space, and confirm. PixelFerry continues by itself after that.", pi)
     }
 

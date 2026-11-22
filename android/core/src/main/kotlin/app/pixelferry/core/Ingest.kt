@@ -2,6 +2,9 @@ package app.pixelferry.core
 
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption
 
 /** Where files land on the Pixel. Android impl = DCIM + MediaScanner + StatFs. */
 interface PixelStorage {
@@ -35,14 +38,20 @@ class IngestEngine(
     private val ledger: Ledger,
     /** Always keep this much free so Android and Google Photos keep working. */
     val reserveBytes: Long = 1_500L * 1024 * 1024,
+    private val exists: (String) -> Boolean = { File(it).exists() },
 ) {
     private val lock = Any()
+    /** Bytes promised to transfers in progress (USB job + Wi-Fi uploads at the same time). */
+    private var inFlight = 0L
+    private val startedAt = System.currentTimeMillis()
 
     fun freeBytes(): Long = storage.freeBytes()
 
-    fun hasRoomFor(size: Long): Boolean = storage.freeBytes() - size >= reserveBytes
+    fun hasRoomFor(size: Long): Boolean = synchronized(lock) { storage.freeBytes() - inFlight - size >= reserveBytes }
 
-    fun alreadyHave(deviceKey: String, itemKey: String): Item? = ledger.find(deviceKey, itemKey)
+    /** The finished record for this file, or null if it still needs sending (never sent, or lost before backup). */
+    fun alreadyHave(deviceKey: String, itemKey: String): Item? =
+        ledger.find(deviceKey, itemKey)?.takeIf { ledger.isDone(it) }
 
     /**
      * @param expectedSha256 from the sender if it computed one (Wi-Fi path); null for USB
@@ -60,28 +69,37 @@ class IngestEngine(
         expectedSha256: String?,
         write: (File) -> Unit,
     ): IngestResult {
-        ledger.find(profile.deviceKey, itemKey)?.let { return IngestResult.AlreadyHave(it) }
+        alreadyHave(profile.deviceKey, itemKey)?.let { return IngestResult.AlreadyHave(it) }
         val sizeKnown = size != UNKNOWN_SIZE
         val need = if (sizeKnown) size else BIG_FILE_ESTIMATE
-        if (!hasRoomFor(need)) throw NotEnoughSpace(need + reserveBytes, storage.freeBytes())
-
+        synchronized(lock) {
+            if (storage.freeBytes() - inFlight - need < reserveBytes) throw NotEnoughSpace(need + reserveBytes, storage.freeBytes())
+            inFlight += need
+        }
         val dir = File(storage.rootDir(), Naming.folderName(profile.owner, profile.label))
-        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create $dir")
         val tmp = File(dir, ".pf-${System.nanoTime()}.part")
         try {
+            if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create $dir (storage permission?)")
             write(tmp)
+            // Force the bytes onto flash BEFORE we verify or record anything (power loss safety).
+            RandomAccessFile(tmp, "rw").use { it.fd.sync() }
             val len = tmp.length()
             if (sizeKnown && len != size) throw VerifyFailed("$originalName: size $len != expected $size")
             if (!sizeKnown && !(MediaTypes.isVideo(originalName) && Mp4Check.isComplete(tmp))) {
-                throw VerifyFailed("$originalName: large file could not be confirmed complete")
+                throw VerifyFailed("$originalName: over 4 GB and arrived incomplete")
             }
-            val sha = Hashing.sha256(tmp) // read back from flash = verifies what is actually stored
+            val sha = Hashing.sha256(tmp)
             if (expectedSha256 != null && !sha.equals(expectedSha256, ignoreCase = true)) {
                 throw VerifyFailed("$originalName: checksum mismatch")
             }
             synchronized(lock) {
-                ledger.find(profile.deviceKey, itemKey)?.let { tmp.delete(); return IngestResult.AlreadyHave(it) }
-                val original = ledger.findByHash(sha)
+                alreadyHave(profile.deviceKey, itemKey)?.let { tmp.delete(); return IngestResult.AlreadyHave(it) }
+                // a lost (MISSING_UNKNOWN) or orphaned earlier record is replaced by this good copy
+                ledger.find(profile.deviceKey, itemKey)?.let { ledger.remove(it.id) }
+                val original = ledger.findByHash(sha)?.takeIf { o ->
+                    o.state == ItemState.BACKED_UP || o.state == ItemState.SOURCE_DELETED ||
+                        (o.state == ItemState.VERIFIED && o.pixelPath != null && exists(o.pixelPath))
+                }
                 if (original != null) {
                     tmp.delete()
                     val dup = ledger.insert(
@@ -93,23 +111,35 @@ class IngestEngine(
                 }
                 val target = Naming.uniqueFile(dir, Naming.targetName(profile.owner, profile.label, originalName))
                 if (!tmp.renameTo(target)) throw IOException("rename failed for $target")
+                syncDir(dir)
                 if (dateTakenMs > 0) target.setLastModified(dateTakenMs)
+                val item = try {
+                    ledger.insert(
+                        Item(deviceKey = profile.deviceKey, itemKey = itemKey, originalName = originalName,
+                            size = len, dateTakenMs = dateTakenMs, pixelPath = target.absolutePath,
+                            sha256 = sha, state = ItemState.VERIFIED)
+                    )
+                } catch (e: Exception) {
+                    target.delete() // never leave a file the ledger doesn't know about
+                    throw IOException("could not record ${target.name}: ${e.message}", e)
+                }
                 storage.publish(target, MediaTypes.mimeFor(target.name), dateTakenMs)
-                val item = ledger.insert(
-                    Item(deviceKey = profile.deviceKey, itemKey = itemKey, originalName = originalName,
-                        size = len, dateTakenMs = dateTakenMs, pixelPath = target.absolutePath,
-                        sha256 = sha, state = ItemState.VERIFIED)
-                )
                 return IngestResult.Stored(item)
             }
         } finally {
             if (tmp.exists()) tmp.delete()
+            synchronized(lock) { inFlight -= need }
         }
     }
 
-    /** Remove stale temp files from an interrupted run. */
+    private fun syncDir(dir: File) {
+        try { FileChannel.open(dir.toPath(), StandardOpenOption.READ).use { it.force(true) } } catch (_: Exception) {}
+    }
+
+    /** Remove temp files left by a crashed earlier run (never ones being written now). */
     fun cleanTemp() {
-        storage.rootDir().walkTopDown().filter { it.isFile && it.name.startsWith(".pf-") && it.name.endsWith(".part") }
+        storage.rootDir().walkTopDown()
+            .filter { it.isFile && it.name.startsWith(".pf-") && it.name.endsWith(".part") && it.lastModified() < startedAt - 60_000 }
             .forEach { it.delete() }
     }
 }

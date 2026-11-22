@@ -10,7 +10,12 @@ interface BackupSignals {
 
 /** Android: AccessibilityService that taps Google Photos' own "Free up space". */
 interface FreeUpAction {
-    /** @return true if an automatic attempt was started; false = user must tap (we notified them). */
+    /**
+     * Start Google Photos' Free up space. The implementation must call
+     * [BackupTracker.openFreeUpWindow] itself at the moment the free-up is really confirmed
+     * (helper pressing the confirm button, or the user tapping "Free up now").
+     * @return true if an automatic attempt was started; false = user was asked to do it.
+     */
     fun requestFreeUp(auto: Boolean): Boolean
 }
 
@@ -88,7 +93,6 @@ class WaveCoordinator(
         }
         if (idleLongEnough && (lastAttempt == 0L || now - lastAttempt >= retryMs)) {
             attempts++; lastAttempt = now
-            tracker.openFreeUpWindow()
             val auto = freeUp.requestFreeUp(autoTap())
             notifier.waiting(neededBytes, engine.freeBytes(), attempts)
             if (!auto) { /* user notified to tap Free up space; window is open for them */ }
@@ -114,12 +118,18 @@ class WaveCoordinator(
         return loop(cancelled, sleepMs)
     }
 
+    private var waiters = 0
+
     private fun loop(cancelled: () -> Boolean, sleepMs: Long): Boolean {
-        while (!cancelled()) {
-            if (tick()) return true
-            Thread.sleep(sleepMs)
+        synchronized(this) { waiters++ }
+        try {
+            while (!cancelled()) {
+                if (tick()) return true
+                Thread.sleep(sleepMs)
+            }
+            return false
+        } finally {
+            synchronized(this) { if (--waiters == 0 && phase == Phase.WAITING) phase = Phase.RUNNING }
         }
-        phase = Phase.RUNNING
-        return false
     }
 }

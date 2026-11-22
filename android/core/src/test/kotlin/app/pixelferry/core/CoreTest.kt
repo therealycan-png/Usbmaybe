@@ -113,7 +113,7 @@ class CoreTest {
         val wave = WaveCoordinator(eng, tracker,
             object : BackupSignals { override fun backingUp() = backingUp; override fun lastActivityMs() = lastAct },
             object : FreeUpAction { override fun requestFreeUp(auto: Boolean): Boolean {
-                freeUps += auto; File(item.pixelPath!!).delete(); return true } }, // Google frees the backed-up file
+                freeUps += auto; tracker.openFreeUpWindow(); File(item.pixelPath!!).delete(); return true } }, // helper confirms, Google frees
             object : WaveNotifier {
                 override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) { events += "wait$attempt" }
                 override fun stuck(reason: String) { events += "stuck" }
@@ -155,8 +155,9 @@ class CoreTest {
     @Test fun pairing_code_format() {
         val t = Pairing.newToken(); assertEquals(8, t.length)
         val pin = Pairing.certPin(ByteArray(100) { it.toByte() })
-        assertEquals(8, pin.length)
-        assertEquals(19, Pairing.code(t, pin).length)
+        assertEquals(19, Pairing.code(t, pin.take(8)).length)
+        assertEquals(16, pin.length)
+        assertEquals(29, Pairing.code(t, pin).length)
         assertEquals("000", Pairing.base32(byteArrayOf(0, 0)).take(3))
     }
 }
@@ -188,5 +189,71 @@ class Mp4CheckTest {
         assertEquals(full.size.toLong(), (r as IngestResult.Stored).item.size)
         assertFailsWith<VerifyFailed> { eng.ingest(p, "big2", "IMG_2.MOV", UNKNOWN_SIZE, 0, null) { it.writeBytes(full.copyOf(5000)) } }
         assertFailsWith<VerifyFailed> { eng.ingest(p, "big3", "IMG_3.JPG", UNKNOWN_SIZE, 0, null) { it.writeBytes(full) } }
+    }
+}
+
+class SafetyRegressionTest {
+    private val mom = DeviceProfile("dev-iphone", "Mom", "iPhone 13")
+
+    @Test fun vanished_before_backup_is_sent_again_not_skipped() {
+        val root = tempDir(); val ledger = MemoryLedger()
+        val eng = IngestEngine(FakeStorage(root), ledger, reserveBytes = 0)
+        val data = byteArrayOf(9, 8, 7, 6)
+        val a = (eng.ingest(mom, "k", "a.jpg", 4, 0, null) { it.writeBytes(data) } as IngestResult.Stored).item
+        // the same bytes also arrive from the Oppo: duplicate
+        val oppo = DeviceProfile("oppo", "S", "Oppo")
+        assertIs<IngestResult.Duplicate>(eng.ingest(oppo, "o", "same.jpg", 4, 0, null) { it.writeBytes(data) })
+        // someone deletes the Pixel copy before Google backed it up
+        File(a.pixelPath!!).delete()
+        BackupTracker(ledger).reconcile()
+        assertEquals(ItemState.MISSING_UNKNOWN, ledger.get(a.id)!!.state)
+        assertNull(eng.alreadyHave(mom.deviceKey, "k"), "must be re-sent")
+        assertNull(eng.alreadyHave(oppo.deviceKey, "o"), "its duplicate must be re-sent too")
+        val again = eng.ingest(mom, "k", "a.jpg", 4, 0, null) { it.writeBytes(data) }
+        assertIs<IngestResult.Stored>(again, "not mistaken for a duplicate of the lost copy")
+        assertEquals(ItemState.VERIFIED, ledger.find(mom.deviceKey, "k")!!.state)
+    }
+
+    @Test fun window_only_counts_files_present_when_it_opened_and_needs_readable_storage() {
+        var t = 0L; val root = tempDir(); val ledger = MemoryLedger()
+        val eng = IngestEngine(FakeStorage(root), ledger, reserveBytes = 0)
+        var readable = true
+        val tracker = BackupTracker(ledger, { t }, storageReadable = { readable })
+        val a = (eng.ingest(mom, "a", "a.jpg", 1, 0, null) { it.writeBytes(byteArrayOf(1)) } as IngestResult.Stored).item
+        tracker.openFreeUpWindow()
+        val b = (eng.ingest(mom, "b", "b.jpg", 1, 0, null) { it.writeBytes(byteArrayOf(2)) } as IngestResult.Stored).item
+        // storage unmounted: everything "missing" -> must change nothing
+        readable = false
+        File(a.pixelPath!!).delete(); File(b.pixelPath!!).delete()
+        tracker.reconcile()
+        assertEquals(ItemState.VERIFIED, ledger.get(a.id)!!.state)
+        readable = true
+        tracker.reconcile()
+        assertEquals(ItemState.BACKED_UP, ledger.get(a.id)!!.state)
+        assertEquals(ItemState.MISSING_UNKNOWN, ledger.get(b.id)!!.state, "arrived after Free up started: not proven")
+        t += 11 * 60_000
+        assertFalse(tracker.isWindowOpen(), "window is short")
+    }
+
+    @Test fun window_is_never_restored_after_restart() {
+        val tracker = BackupTracker(MemoryLedger())
+        tracker.restoreWindow(System.currentTimeMillis() + 600_000)
+        assertFalse(tracker.isWindowOpen())
+    }
+
+    @Test fun parallel_transfers_cannot_overrun_the_reserve() {
+        val root = tempDir()
+        val eng = IngestEngine(FakeStorage(root, capacity = 1_000_000), MemoryLedger(), reserveBytes = 200_000)
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val started = java.util.concurrent.CountDownLatch(1)
+        val t = Thread {
+            eng.ingest(mom, "x", "x.jpg", 500_000, 0, null) { started.countDown(); gate.await(); it.writeBytes(ByteArray(500_000)) }
+        }.apply { start() }
+        started.await()
+        // 500k promised to x; 400k more would leave < 200k reserve
+        assertFalse(eng.hasRoomFor(400_000))
+        assertFailsWith<NotEnoughSpace> { eng.ingest(mom, "y", "y.jpg", 400_000, 0, null) { it.writeBytes(ByteArray(400_000)) } }
+        gate.countDown(); t.join()
+        assertTrue(eng.hasRoomFor(250_000))
     }
 }

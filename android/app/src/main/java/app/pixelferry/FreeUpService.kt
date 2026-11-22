@@ -22,14 +22,17 @@ class FreeUpService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private var clicks = 0
     private var lastClick = 0L
+    private var lastScan = 0L
 
     override fun onServiceConnected() { instance = this }
     override fun onDestroy() { instance = null; super.onDestroy() }
     override fun onInterrupt() {}
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (!armed || event?.packageName != PhotosWatcher.PHOTOS) return
-        if (System.currentTimeMillis() - lastClick < 1200) return
+        if (!armed || event?.packageName?.toString() != PhotosWatcher.PHOTOS) return
+        val now = System.currentTimeMillis()
+        if (now - lastClick < 1200 || now - lastScan < 700) return // keep the main thread free
+        lastScan = now
         val root = rootInActiveWindow ?: return
         step(root)
     }
@@ -42,7 +45,10 @@ class FreeUpService : AccessibilityService() {
 
         // 1) The final confirm button: "Free up 3.2 GB" / "Free up"
         all.firstOrNull { n -> label(n)?.let { CONFIRM.matches(it) } == true && clickableSelfOrParent(n) != null }
-            ?.let { click(it); main.postDelayed({ finish(true, "freed") }, 6000); return }
+            ?.let {
+                Hub.tracker.openFreeUpWindow() // Google's own confirm is being pressed now
+                click(it); main.postDelayed({ finish(true, "freed") }, 6000); return
+            }
         // 2) The menu entry: "Free up space" / "Free up device storage"
         all.firstOrNull { n -> label(n)?.lowercase()?.let { l -> MENU.any { l.contains(it) } } == true }
             ?.let { click(it); return }
@@ -67,6 +73,7 @@ class FreeUpService : AccessibilityService() {
 
     private fun click(n: AccessibilityNodeInfo) {
         val target = clickableSelfOrParent(n) ?: return
+        if (!target.isVisibleToUser) return
         clicks++; lastClick = System.currentTimeMillis()
         target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     }
@@ -90,7 +97,7 @@ class FreeUpService : AccessibilityService() {
     companion object {
         @Volatile var instance: FreeUpService? = null
         @Volatile var armed = false
-        private val CONFIRM = Regex("(?i)^free up( [0-9.,]+\\s*(kb|mb|gb|tb))?$")
+        private val CONFIRM = Regex("(?i)^free up([\\s\\u00A0]+[0-9.,]+[\\s\\u00A0]*(kb|mb|gb|tb))?$")
         private val MENU = listOf("free up space", "free up device storage", "free up storage")
         private val ACCOUNT = listOf("account", "profile")
         private val NOTHING = listOf("nothing to free", "no items to free", "already been removed")

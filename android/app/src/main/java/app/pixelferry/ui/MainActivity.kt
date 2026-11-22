@@ -64,10 +64,26 @@ class MainActivity : Activity() {
         registerReceiver(permReceiver, IntentFilter(ACTION_USB_PERMISSION))
         registerReceiver(attachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED).apply {
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) })
-        handleUsbIntent(intent)
+        if (savedInstanceState == null) handleIntent(intent)
     }
 
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleUsbIntent(intent) }
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIntent(intent) }
+
+    private fun handleIntent(i: Intent?) {
+        when (i?.action) {
+            UsbManager.ACTION_USB_DEVICE_ATTACHED -> handleUsbIntent(i)
+            ACTION_FREE_UP_NOW -> freeUpNow()
+        }
+        setIntent(Intent(this, MainActivity::class.java)) // never re-handle on rotation
+    }
+
+    /** You chose to run Free up space: open the short window, then go to Google Photos. */
+    private fun freeUpNow() {
+        Hub.tracker.openFreeUpWindow()
+        packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) }
+            ?: toast("Google Photos is not installed")
+        toast("In Google Photos: profile picture > Free up space > confirm")
+    }
 
     override fun onDestroy() { unregisterReceiver(permReceiver); unregisterReceiver(attachReceiver); super.onDestroy() }
 
@@ -90,15 +106,17 @@ class MainActivity : Activity() {
     private val bar by lazy { ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal) }
     private val stTitle by lazy { h("") }
     private val stDetail by lazy { p() }
+    private val freeBtn by lazy { btn("Free up space now (Google Photos)", primary = true) { freeUpNow() } }
     private val stCounts by lazy { p(size = 14f, color = 0xFF5F6368.toInt()) }
 
     private fun tick() {
         val r = Hub.run
         if (status.childCount == 0) {
-            status.add(stTitle, bar, stCounts, stDetail,
+            status.add(stTitle, bar, stCounts, stDetail, freeBtn,
                 btn("Stop") { TransferService.send(this, TransferService.ACTION_STOP) })
         }
         stTitle.text = r.title
+        freeBtn.visibility = if (Hub.wave.phase == app.pixelferry.core.WaveCoordinator.Phase.WAITING) android.view.View.VISIBLE else android.view.View.GONE
         stDetail.text = r.detail + if (r.errors.isNotEmpty()) "\n\nProblems: ${r.errors.takeLast(3).joinToString("\n")}" else ""
         bar.max = r.total.coerceAtLeast(1); bar.progress = r.done
         val el = (System.currentTimeMillis() - r.startedAt).coerceAtLeast(1)
@@ -140,8 +158,18 @@ class MainActivity : Activity() {
         row(batteryOk, "Keep running with the screen off") {
             startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
         }
-        setup.add(p("In Google Photos: Settings > Backup > ON, quality 'Original', and after the first transfer from a new device, " +
-            "Back up device folders > turn ON the new PixelFerry folder.", 13f, 0xFF5F6368.toInt()))
+        val prefs = getSharedPreferences("pf", 0)
+        row(prefs.getBoolean("qualityOriginal", false), "Google Photos backup quality is 'Original'") {
+            AlertDialog.Builder(this).setTitle("Check Google Photos quality")
+                .setMessage("Open Google Photos > profile picture > Photos settings > Backup > Backup quality.\n\n" +
+                    "It must say 'Original quality'. With 'Storage saver', Google keeps a compressed copy, and deleting the " +
+                    "originals from your phones would lose quality.\n\nIs it set to Original quality?")
+                .setNegativeButton("Not yet") { _, _ -> packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) } }
+                .setPositiveButton("Yes, Original") { _, _ -> prefs.edit().putBoolean("qualityOriginal", true).apply(); renderSetup() }
+                .show()
+        }
+        setup.add(p("Also in Google Photos: Backup ON, and after the first transfer from a new device, " +
+            "Backup > Back up device folders > turn ON the new PixelFerry folder.", 13f, 0xFF5F6368.toInt()))
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -175,15 +203,21 @@ class MainActivity : Activity() {
 
     private fun openUsb(d: UsbDevice) {
         if (Hub.run.active) { toast("A transfer is running. Stop it first or wait."); return }
+        val current = Hub.source
+        if (current is MtpSource && current.isDevice(d) && current.isConnected()) {
+            startActivity(Intent(this, PickActivity::class.java)); return // reuse the open session
+        }
         thread {
+            current?.close() // close the old session before opening a new one (off the main thread)
+            Hub.source = null
             val src = try { MtpSource.open(usb, d) } catch (e: Exception) { null }
             runOnUiThread {
+                if (isFinishing || isDestroyed) { src?.let { Hub.source = it }; return@runOnUiThread }
                 if (src == null) {
                     AlertDialog.Builder(this).setTitle("Can't read this device yet")
                         .setMessage("• iPhone: unlock it and tap 'Trust' or 'Allow'.\n• Android phone/tablet: swipe down on it, tap the USB notification, choose 'File transfer'.\n• Camera: set its USB mode to MTP/PTP or storage. In storage mode use 'Choose a folder'.\nThen tap Open again.")
                         .setPositiveButton("OK", null).show()
                 } else {
-                    Hub.source?.takeIf { it !== src }?.close()
                     Hub.source = src
                     startActivity(Intent(this, PickActivity::class.java))
                 }
@@ -205,14 +239,20 @@ class MainActivity : Activity() {
 
     // ---------- delete from source ----------
     private fun renderDelete() {
-        delete.removeAllViews()
         val src = Hub.source
-        if (src == null) { delete.visibility = android.view.View.GONE; return }
+        if (src == null) { delete.removeAllViews(); delete.visibility = android.view.View.GONE; return }
+        thread { // database work off the main thread (10k rows)
+            val prof = Hub.ledger.device(src.deviceKey)
+            val label = prof?.let { "${it.owner}'s ${it.label}" } ?: src.suggestedLabel
+            val items = Hub.ledger.deletableFor(src.deviceKey)
+            val waiting = Hub.ledger.forDevice(src.deviceKey).count { it.state == ItemState.VERIFIED }
+            runOnUiThread { if (!isDestroyed) showDelete(label, items, waiting) }
+        }
+    }
+
+    private fun showDelete(label: String, items: List<app.pixelferry.core.Item>, waiting: Int) {
+        delete.removeAllViews()
         delete.visibility = android.view.View.VISIBLE
-        val prof = Hub.ledger.device(src.deviceKey)
-        val label = prof?.let { "${it.owner}'s ${it.label}" } ?: src.suggestedLabel
-        val items = Hub.ledger.deletableFor(src.deviceKey)
-        val waiting = Hub.ledger.forDevice(src.deviceKey).count { it.state == ItemState.VERIFIED }
         delete.add(h("Delete from $label"))
         delete.add(p("${items.size} files (${fmt(items.sumOf { it.size })}) are confirmed backed up by Google Photos and can be removed from $label." +
             if (waiting > 0) "\n$waiting more are on the Pixel waiting for Google backup (kept on $label for now)." else ""))
@@ -280,5 +320,6 @@ class MainActivity : Activity() {
     companion object {
         const val ACTION_USB_PERMISSION = "app.pixelferry.USB_PERMISSION"
         const val REQ_TREE = 7
+        const val ACTION_FREE_UP_NOW = "app.pixelferry.FREE_UP_NOW"
     }
 }
