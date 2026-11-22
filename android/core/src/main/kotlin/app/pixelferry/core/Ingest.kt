@@ -48,8 +48,8 @@ class IngestEngine(
     /** Always keep this much free so Android and Google Photos keep working. */
     val reserveBytes: Long = 1_500L * 1024 * 1024,
     private val exists: (String) -> Boolean = { File(it).exists() },
-    /** Told about every stored file (BackupTracker uses it to account for free space). */
-    var onStored: (Long) -> Unit = {},
+    /** Told about every stored file: (bytes, time they were written to disk). BackupTracker uses it for free-space accounting. */
+    var onStored: (Long, Long) -> Unit = { _, _ -> },
 ) {
     /** Guards dedupe + ledger + rename (commit stage). */
     private val lock = Any()
@@ -73,6 +73,8 @@ class IngestEngine(
         val dateTakenMs: Long, internal val tmp: File, internal val dir: File, internal val need: Long,
         /** SHA-256 the writer computed from the exact bytes it wrote (streaming), if it could. */
         internal val writerSha: String?,
+        /** When the bytes finished landing on disk (a free-up window opened later must not count them). */
+        internal val writtenAt: Long = System.currentTimeMillis(),
     )
 
     /**
@@ -189,10 +191,11 @@ class IngestEngine(
             }
             // Outside the lock (slow, and safe in any order: if the rename were lost in a crash the
             // file would read as missing -> MISSING_UNKNOWN -> re-sent; it can never become "backed up").
+            // The file is recorded now, so nothing below may throw (a retry would count it twice).
             val (target, item) = stored!!
-            storage.syncDir(p.dir)
-            onStored(len)
-            storage.publish(target, MediaTypes.mimeFor(target.name), p.dateTakenMs)
+            try { storage.syncDir(p.dir) } catch (_: Throwable) {}
+            try { onStored(len, p.writtenAt) } catch (_: Throwable) {}
+            try { storage.publish(target, MediaTypes.mimeFor(target.name), p.dateTakenMs) } catch (_: Throwable) {}
             return IngestResult.Stored(item)
         } finally {
             if (tmp.exists()) tmp.delete()
@@ -211,8 +214,8 @@ class IngestEngine(
 
     fun ingestHashed(profile: DeviceProfile, itemKey: String, originalName: String, size: Long, dateTakenMs: Long,
                      expectedSha256: String?, write: (File) -> String?): IngestResult {
-        val p = receive(profile, itemKey, originalName, size, dateTakenMs, true, false, write)
-            ?: return IngestResult.AlreadyHave(alreadyHave(profile.deviceKey, itemKey)!!)
+        alreadyHave(profile.deviceKey, itemKey)?.let { return IngestResult.AlreadyHave(it) }
+        val p = receive(profile, itemKey, originalName, size, dateTakenMs, false, false, write)!! // checkDone=false never returns null
         return commit(p, expectedSha256)
     }
 

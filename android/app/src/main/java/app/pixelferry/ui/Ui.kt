@@ -183,10 +183,35 @@ fun LinearLayout.add(vararg v: View): LinearLayout { v.forEach { addView(it) }; 
 
 /** Big circular progress ring with the percentage in the middle. */
 class ProgressRing(ctx: Context) : View(ctx) {
-    var fraction = 0f; set(v) { field = v.coerceIn(0f, 1f); invalidate() }
-    var center = "0%"; set(v) { field = v; invalidate() }
-    var caption = ""; set(v) { field = v; invalidate() }
-    var indeterminate = false; set(v) { field = v; invalidate() }
+    var fraction = 0f; set(v) { if (field != v.coerceIn(0f, 1f)) { field = v.coerceIn(0f, 1f); invalidate() } }
+    var center = "0%"; set(v) { if (field != v) { field = v; describe(); invalidate() } }
+    var caption = ""; set(v) { if (field != v) { field = v; describe(); invalidate() } }
+    var indeterminate = false; set(v) { if (field != v) { field = v; updateSpin(); invalidate() } }
+
+    private fun describe() { contentDescription = "$center $caption" }
+
+    /** Gentle 20 fps spinner that only runs while the ring is actually on screen. */
+    private val spinner = android.animation.ValueAnimator.ofFloat(0f, 360f).apply {
+        duration = 1400; repeatCount = android.animation.ValueAnimator.INFINITE
+        interpolator = android.view.animation.LinearInterpolator()
+        addUpdateListener {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - lastFrame >= 50) { lastFrame = now; spin = it.animatedValue as Float; invalidate() }
+        }
+    }
+    private var lastFrame = 0L
+
+    private fun updateSpin() {
+        val show = indeterminate && isAttachedToWindow && isShown
+        if (show && !spinner.isStarted) spinner.start() else if (!show && spinner.isStarted) spinner.cancel()
+    }
+    override fun onAttachedToWindow() { super.onAttachedToWindow(); updateSpin() }
+    override fun onDetachedFromWindow() { spinner.cancel(); super.onDetachedFromWindow() }
+    override fun onVisibilityChanged(changedView: View, visibility: Int) { super.onVisibilityChanged(changedView, visibility); updateSpin() }
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        arc.shader = android.graphics.SweepGradient(w / 2f, h / 2f, intArrayOf(C.PRIMARY, C.PRIMARY2, C.PRIMARY), null)
+    }
     private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = C.TINT_BLUE; strokeCap = Paint.Cap.ROUND }
     private val arc = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
     private val big = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = C.INK; textAlign = Paint.Align.CENTER; typeface = Typeface.create("sans-serif-medium", Typeface.BOLD) }
@@ -206,15 +231,13 @@ class ProgressRing(ctx: Context) : View(ctx) {
         val left = (width - size) / 2f; val top = (height - size) / 2f
         box.set(left, top, left + size, top + size)
         track.strokeWidth = sw; arc.strokeWidth = sw
-        arc.shader = android.graphics.SweepGradient(width / 2f, height / 2f, intArrayOf(C.PRIMARY, C.PRIMARY2, C.PRIMARY), null)
         c.drawArc(box, 0f, 360f, false, track)
         if (indeterminate) {
-            c.drawArc(box, spin - 90f, 70f, false, arc); spin = (spin + 6f) % 360f; postInvalidateOnAnimation()
+            c.drawArc(box, spin - 90f, 70f, false, arc)
         } else if (fraction > 0f) c.drawArc(box, -90f, 360f * fraction, false, arc)
         big.textSize = context.dpf(40f); small.textSize = context.dpf(14f)
         c.drawText(center, width / 2f, height / 2f + context.dpf(10f), big)
         if (caption.isNotEmpty()) c.drawText(caption, width / 2f, height / 2f + context.dpf(34f), small)
-        contentDescription = "$center $caption"
     }
 }
 

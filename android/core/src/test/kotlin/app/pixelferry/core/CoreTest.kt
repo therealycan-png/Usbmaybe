@@ -266,7 +266,7 @@ class Round2SafetyTest {
         val storage = FakeStorage(root, capacity = 10_000_000)
         val eng = IngestEngine(storage, ledger, reserveBytes = 0)
         val tracker = BackupTracker(ledger, freeBytes = storage::freeBytes)
-        eng.onStored = tracker::noteStored
+        eng.onStored = { b, at -> tracker.noteStored(b, at) }
         return Triple(eng, ledger, tracker)
     }
 
@@ -306,4 +306,18 @@ class Round2SafetyTest {
         assertEquals(ItemState.VERIFIED, ledger.get(b.id)!!.state)
     }
 
+
+    @Test fun file_received_before_window_but_committed_after_cannot_fake_freed_space() {
+        val (eng, ledger, tracker) = setup()
+        val a = eng.put("a", 100_000, 3)                       // on the Pixel, not backed up
+        // a 5x bigger file is already received (on disk) but still waiting in the pipeline
+        val pending = eng.receive(mom, "big", "big.jpg", 500_000, 0) { it.writeBytes(ByteArray(500_000) { 1 }); null }!!
+        Thread.sleep(5)
+        tracker.openFreeUpWindow()
+        // the user trashes "a" in a gallery app: moved on the same storage, no space comes back
+        File(a.pixelPath!!).renameTo(File(File(a.pixelPath!!).parentFile.parentFile, ".trashed-a.jpg"))
+        eng.commit(pending, null)                               // pipeline commits the big file now
+        tracker.reconcile()
+        assertEquals(ItemState.MISSING_UNKNOWN, ledger.get(a.id)!!.state, "old bytes must not count as freed space")
+    }
 }

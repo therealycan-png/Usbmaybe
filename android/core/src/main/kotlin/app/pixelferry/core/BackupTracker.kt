@@ -40,13 +40,21 @@ class BackupTracker(
     private var storedSinceOpen = 0L
     private var acceptedBytes = 0L
 
-    /** The engine reports every new file so its bytes don't hide freed space. */
-    @Synchronized fun noteStored(bytes: Long) { if (isWindowOpen()) storedSinceOpen += bytes }
+    private var openedAt = 0L
+
+    /**
+     * The engine reports every new file so its bytes don't hide freed space. Only bytes that
+     * landed on disk AFTER the window opened count (files received earlier and committed later
+     * were already in freeAtOpen and must not inflate the freed amount).
+     */
+    @Synchronized fun noteStored(bytes: Long, writtenAt: Long = clock()) {
+        if (isWindowOpen() && writtenAt >= openedAt) storedSinceOpen += bytes
+    }
 
     @Synchronized fun openFreeUpWindow() {
         reconcileLocked(windowOpen = false) // anything already gone is NOT Google's doing
         snapshot = ledger.byState(ItemState.VERIFIED).filter { it.pixelPath != null && exists(it.pixelPath) }.map { it.id }.toSet()
-        freeAtOpen = freeBytes?.invoke() ?: 0; storedSinceOpen = 0; acceptedBytes = 0
+        freeAtOpen = freeBytes?.invoke() ?: 0; storedSinceOpen = 0; acceptedBytes = 0; openedAt = clock()
         windowOpenUntil = clock() + windowMs
         onWindowChanged(windowOpenUntil)
     }

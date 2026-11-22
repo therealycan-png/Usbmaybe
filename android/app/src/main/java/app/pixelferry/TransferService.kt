@@ -105,13 +105,17 @@ class TransferService : Service() {
     @Synchronized private fun syncLocks() {
         val w = wake ?: getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pixelferry:run").apply { setReferenceCounted(false) }.also { wake = it }
-        if (busy() && !w.isHeld) w.acquire() else if (!busy() && w.isHeld) w.release()
+        // 12 h safety timeout (refreshed while busy), so a bug can never keep the Pixel awake forever
+        if (busy()) { w.acquire(12 * 3600_000L); lastLockRefresh = System.currentTimeMillis() } else if (w.isHeld) w.release()
     }
 
     private fun releaseLocks() { wake?.let { if (it.isHeld) it.release() } }
 
+    private var lastLockRefresh = 0L
+
     private fun updateNotif(force: Boolean = false) {
         val now = System.currentTimeMillis()
+        if (now - lastLockRefresh > 10 * 60_000L) main.post { syncLocks() }
         if (!force && now - lastNotif < 1000) return
         lastNotif = now
         val r = Hub.run
@@ -303,9 +307,9 @@ class TransferService : Service() {
         }
 
         fun fmt(b: Long): String = when {
-            b >= 1L shl 30 -> String.format("%.1f GB", b / (1L shl 30).toDouble())
-            b >= 1L shl 20 -> String.format("%.0f MB", b / (1L shl 20).toDouble())
-            else -> String.format("%.0f KB", b / 1024.0)
+            b >= 1L shl 30 -> String.format(java.util.Locale.US, "%.1f GB", b / (1L shl 30).toDouble())
+            b >= 1L shl 20 -> String.format(java.util.Locale.US, "%.0f MB", b / (1L shl 20).toDouble())
+            else -> String.format(java.util.Locale.US, "%.0f KB", b / 1024.0)
         }
     }
 }

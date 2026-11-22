@@ -39,6 +39,7 @@
                 android:resource="@xml/usb_devices" />
         </activity>
 
+        <activity android:name=".ui.SetupActivity" android:exported="false" android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity android:name=".ui.PickActivity" android:exported="false" android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <service android:name=".TransferService" android:exported="false" />

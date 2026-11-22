@@ -28,7 +28,7 @@ class App : Application() {
 object Hub {
     val ledger by lazy { SqliteLedger(App.instance) }
     val storage by lazy { AndroidStorage(App.instance) }
-    val engine by lazy { IngestEngine(storage, ledger).also { e -> e.onStored = { tracker.noteStored(it) } } }
+    val engine by lazy { IngestEngine(storage, ledger).also { e -> e.onStored = { bytes, at -> tracker.noteStored(bytes, at) } } }
     val tracker by lazy {
         val prefs = App.instance.getSharedPreferences("pf", 0)
         BackupTracker(ledger,

@@ -81,6 +81,14 @@ class SetupActivity : Activity() {
         root.addView(btn("Let's go", primary = true) { finish() })
     }
 
+    /** Open a settings screen; if this phone doesn't have it, fall back to the app's own settings page. */
+    fun open(i: Intent, hint: String?) {
+        try { startActivity(i) } catch (_: android.content.ActivityNotFoundException) {
+            try { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) } catch (_: Exception) {}
+        }
+        hint?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+    }
+
     private fun skipped(s: Step) = s.optional && getSharedPreferences("pf", 0).getBoolean("skip_${s.title}", false)
 
     private fun spacer(h: Int) = android.view.View(this).apply { layoutParams = LinearLayout.LayoutParams(1, dp(h)) }
@@ -100,28 +108,32 @@ class SetupActivity : Activity() {
                 "PixelFerry puts your photos in a PixelFerry folder so Google Photos backs them up.",
                 "Allow",
                 done = { it.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED },
-                go = { it.requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE), 1) }),
+                go = {
+                    val p = it.getSharedPreferences("pf", 0)
+                    if (p.getBoolean("askedStorage", false) && !it.shouldShowRequestPermissionRationale(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                        // "Don't ask again" was chosen earlier: Android won't show the dialog, so open the app's settings
+                        it.open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${it.packageName}")),
+                            "Tap Permissions › Storage › Allow")
+                    } else {
+                        p.edit().putBoolean("askedStorage", true).apply()
+                        it.requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE), 1)
+                    }
+                }),
             Step("🔔", C.TINT_AMBER, "Know when Google is done",
                 "Lets PixelFerry see Google Photos' \"Backing up\" notification, so it knows when it's safe to continue. It ignores every other app.\n\nNext screen: find PixelFerry backup watcher, switch it ON, then press Back.",
                 "Open settings",
                 done = { PhotosWatcher.isEnabled(it) },
-                go = {
-                    it.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                    Toast.makeText(it, "Turn ON \"PixelFerry backup watcher\"", Toast.LENGTH_LONG).show()
-                }),
+                go = { it.open(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS), "Turn ON \"PixelFerry backup watcher\"") }),
             Step("✨", C.TINT_VIOLET, "Free up space by itself",
                 "When the Pixel is full, PixelFerry taps Google Photos' own \"Free up space\" for you. Google only removes what it has backed up.\n\nNext screen: tap PixelFerry free-up helper, switch it ON, then press Back twice.",
                 "Open settings", optional = true,
                 done = { FreeUpService.isEnabled(it) },
-                go = {
-                    it.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                    Toast.makeText(it, "Tap \"PixelFerry free-up helper\" and turn it ON", Toast.LENGTH_LONG).show()
-                }),
+                go = { it.open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS), "Tap \"PixelFerry free-up helper\" and turn it ON") }),
             Step("🔋", C.TINT_GREEN, "Keep going with the screen off",
                 "Big transfers can take hours. This stops Android from pausing PixelFerry.",
                 "Allow",
                 done = { it.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(it.packageName) },
-                go = { it.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${it.packageName}"))) }),
+                go = { it.open(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${it.packageName}")), null) }),
             Step("☁️", C.TINT_BLUE, "Google Photos on Original quality",
                 "In Google Photos: profile picture > Photos settings > Backup > Backup quality must say \"Original quality\". Otherwise Google keeps a smaller copy.",
                 "It says Original quality",

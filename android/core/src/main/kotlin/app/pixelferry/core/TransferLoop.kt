@@ -89,30 +89,48 @@ class TransferLoop(
                 is Job.Barrier -> j.latch.countDown()
                 is Job.Work -> {
                     val e = j.entry
+                    // decide the outcome first; count it afterwards (a UI hiccup must never turn into a retry)
+                    var outcome: (Progress) -> Unit
                     try {
                         val r = engine.commit(j.pending, null)
                         wave.fileStored()
-                        advance(e) { p -> when (r) {
+                        outcome = { p -> when (r) {
                             is IngestResult.Stored -> p.stored++
                             is IngestResult.Duplicate -> p.duplicates++
                             is IngestResult.AlreadyHave -> p.skipped++
                         } }
                     } catch (ex: TooBigForGoogle) {
-                        advance(e) { p -> p.failed++; p.errors += ex.message ?: e.name }
-                    } catch (ex: Exception) {
+                        outcome = { p -> p.failed++; p.errors += ex.message ?: e.name }
+                    } catch (t: Throwable) {
                         // bad copy (or disk hiccup): fetch it again later
-                        if (j.attempt + 1 >= 3) advance(e) { p -> p.failed++; p.errors += "${e.name}: ${ex.message}" }
-                        else retries += e to j.attempt + 1
+                        if (j.attempt + 1 >= 3) outcome = { p -> p.failed++; p.errors += "${e.name}: ${t.message}" }
+                        else { retries += e to j.attempt + 1; continue }
                     }
+                    try { advance(e, outcome) } catch (_: Throwable) { /* progress display only */ }
                 }
             }
         }
     }, "pf-verify").apply { isDaemon = true; start() }
 
+    private var verifierThread: Thread? = null
+
+    /** Hand a received file to the verifier; never blocks forever if the verifier died. */
+    private fun hand(job: Job) {
+        while (!queue.offer(job, 1, java.util.concurrent.TimeUnit.SECONDS)) {
+            if (verifierThread?.isAlive != true) {
+                if (job is Job.Work) engine.abandon(job.pending)
+                throw IllegalStateException("verifier stopped")
+            }
+        }
+    }
+
     /** Wait until everything received so far is verified and recorded. */
     private fun drain() {
         val l = java.util.concurrent.CountDownLatch(1)
-        queue.put(Job.Barrier(l)); l.await()
+        hand(Job.Barrier(l))
+        while (!l.await(1, java.util.concurrent.TimeUnit.SECONDS)) {
+            if (verifierThread?.isAlive != true) throw IllegalStateException("verifier stopped")
+        }
     }
 
     fun run(profile: DeviceProfile, source: CopySource, selection: List<SourceEntry>): LoopEnd {
@@ -122,7 +140,7 @@ class TransferLoop(
         engine.cleanTemp()
         // one query up front instead of one per file on the cable thread
         done = ledger.forDevice(profile.deviceKey).filter { ledger.isDone(it) }.mapTo(HashSet()) { it.itemKey }
-        val v = verifier()
+        val v = verifier().also { verifierThread = it }
         try {
             var work: List<Pair<SourceEntry, Int>> = entries.map { it to 0 }
             while (work.isNotEmpty()) {
@@ -135,7 +153,9 @@ class TransferLoop(
             }
             return LoopEnd.FINISHED
         } finally {
-            queue.put(Job.Stop); v.join()
+            if (v.isAlive) { queue.offer(Job.Stop, 5, java.util.concurrent.TimeUnit.SECONDS); v.join(30_000) }
+            // anything never verified is released (its temp file deleted); it's simply sent next time
+            generateSequence { queue.poll() }.forEach { if (it is Job.Work) engine.abandon(it.pending) }
             engine.discardPrepared()
         }
     }
@@ -153,7 +173,7 @@ class TransferLoop(
                 val pending = engine.receive(profile, e.itemKey, e.name, e.size, e.dateMs, checkDone = false, prepareAhead = true) { source.copyHashed(e, it) }
                 if (pending == null) { advance(e) { it.skipped++ }; return null }
                 if (!source.isConnected()) { engine.abandon(pending); return LoopEnd.UNPLUGGED } // may be cut short
-                queue.put(Job.Work(pending, e, attempt))
+                hand(Job.Work(pending, e, attempt))
                 return null
             } catch (ex: NotEnoughSpace) {
                 drain() // let pending files finish so their space is counted properly
