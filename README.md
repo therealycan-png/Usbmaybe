@@ -93,7 +93,7 @@ If you have a Windows PC, *iCloud for Windows* can download everything at once, 
 | Transfer speed | IETF RFC 6349 transfer-time ratio (ideal ÷ actual over the same link) | **98.4 %** overall (99 % camera roll); **99.8 %** of a plain copy that checks nothing |
 | Accessibility | Google Accessibility Test Framework (the engine behind Play Console's pre-launch report, WCAG 2.1) on every screen | **52/52 checks pass (100 %)** |
 | Code health | Android Lint | **0 errors** |
-| Safety | 34 automated tests, incl. a 10,000-file run with an unplug, corrupted copies and Pixel-full waves, and an end-to-end computer test over TLS | **all pass** |
+| Safety | 33 automated tests, incl. a 10,000-file run with an unplug, corrupted copies and Pixel-full waves, and an end-to-end computer test over TLS | **all pass** |
 
 Re-run them with `./gradlew :core:test :app:testReleaseUnitTest :app:lintRelease` (reports: `android/core/build/efficiency.txt`, `android/app/build/accessibility.txt`). Not tested yet: a real phone. There's no Android emulator or USB device in the build environment, so the first real run is the final test.
 
