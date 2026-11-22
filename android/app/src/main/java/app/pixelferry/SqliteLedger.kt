@@ -80,6 +80,12 @@ class SqliteLedger(ctx: Context) : SQLiteOpenHelper(ctx, "ledger.db", null, 1), 
         return item.copy(id = id)
     }
 
+    override fun setStates(updates: Map<Long, ItemState>) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try { updates.forEach { (id, st) -> setState(id, st) }; db.setTransactionSuccessful() } finally { db.endTransaction() }
+    }
+
     override fun setState(id: Long, state: ItemState) {
         writableDatabase.update("items", ContentValues().apply {
             put("state", state.name); put("updated", System.currentTimeMillis())

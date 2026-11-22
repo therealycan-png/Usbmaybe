@@ -18,7 +18,7 @@ Move photos and videos from any phone, tablet, camera or computer onto an **orig
 
 ## 1. Install on the Pixel XL
 
-1. On the Pixel, open this repository's `release/PixelFerry.apk` and download it.
+1. On the Pixel, open this repository on GitHub (branch `claude/multi-device-photo-transfer-xdaim4`), go to `release/PixelFerry.apk` and tap **Download** (View raw).
 2. Open the downloaded file. If Android asks, allow "Install unknown apps" for your browser or Files app.
 3. Open **PixelFerry** and go through the **Setup checklist**:
    - **Save photos to the Pixel**: Allow.

@@ -6,15 +6,16 @@ import java.io.File
  * Decides when a Pixel copy counts as "backed up by Google".
  *
  * Google gives apps no API for that. The one signal that cannot lie: Google Photos'
- * "Free up space" deletes ONLY items it has already backed up. So:
- *   - a short "free-up window" opens ONLY when Free up space is actually being run:
- *     the helper is about to press Google's confirm button, or you tapped our
- *     "Free up now" notification/button. Retries and reminders never open it.
- *   - only files that were on the Pixel when the window opened can count (snapshot)
- *   - VERIFIED files that disappear inside the window    -> BACKED_UP  (source deletable)
- *   - VERIFIED files that disappear any other way        -> MISSING_UNKNOWN (source kept; re-sent next time)
- *   - a file that just moved (same name found elsewhere) -> MISSING_UNKNOWN
- *   - if the Pixel's storage can't be read at all, nothing changes
+ * "Free up space" deletes ONLY items it has already backed up. So a copy is BACKED_UP only if:
+ *   1. it vanished inside a short window that opened when Free up space was really confirmed
+ *      (helper saw/pressed Google's confirm button, or you chose "Free up now"),
+ *   2. it was on the Pixel when the window opened (anything already missing is MISSING_UNKNOWN),
+ *   3. it was not just moved (same name + size found elsewhere on the Pixel),
+ *   4. the free space actually went UP by (about) the size of what vanished. Trashing a file
+ *      in Google Photos or a gallery moves it on the same partition and frees nothing, so a
+ *      trashed-not-backed-up photo can't pass,
+ *   5. the Pixel's storage was readable at the time.
+ * Everything else is MISSING_UNKNOWN: the source is kept and the file is sent again next time.
  */
 class BackupTracker(
     private val ledger: Ledger,
@@ -25,16 +26,28 @@ class BackupTracker(
     private val onWindowChanged: (Long) -> Unit = {},
     /** Is the Pixel's storage mounted and readable right now? */
     private val storageReadable: () -> Boolean = { true },
-    /** Does a file with this name exist anywhere else (moved, not freed)? */
-    private val foundElsewhere: (String) -> Boolean = { false },
+    /** Rebuild the "elsewhere" index (called once per reconcile pass that needs it). */
+    private val refreshElsewhere: () -> Unit = {},
+    /** Does a file with this name and size exist outside PixelFerry's folder (moved, not freed)? */
+    private val foundElsewhere: (String, Long) -> Boolean = { _, _ -> false },
+    /** Free space on the Pixel. null = skip the space check (unit tests that don't model space only). */
+    private val freeBytes: (() -> Long)? = null,
 ) {
     @Volatile var windowOpenUntil: Long = 0
         private set
     private var snapshot: Set<Long> = emptySet()
+    private var freeAtOpen = 0L
+    private var storedSinceOpen = 0L
+    private var acceptedBytes = 0L
+
+    /** The engine reports every new file so its bytes don't hide freed space. */
+    @Synchronized fun noteStored(bytes: Long) { if (isWindowOpen()) storedSinceOpen += bytes }
 
     @Synchronized fun openFreeUpWindow() {
+        reconcileLocked(windowOpen = false) // anything already gone is NOT Google's doing
+        snapshot = ledger.byState(ItemState.VERIFIED).filter { it.pixelPath != null && exists(it.pixelPath) }.map { it.id }.toSet()
+        freeAtOpen = freeBytes?.invoke() ?: 0; storedSinceOpen = 0; acceptedBytes = 0
         windowOpenUntil = clock() + windowMs
-        snapshot = ledger.byState(ItemState.VERIFIED).map { it.id }.toSet()
         onWindowChanged(windowOpenUntil)
     }
 
@@ -47,17 +60,25 @@ class BackupTracker(
 
     data class Reconcile(val backedUp: Int, val missing: Int, val stillOnPixel: Int)
 
-    @Synchronized fun reconcile(): Reconcile {
+    @Synchronized fun reconcile(): Reconcile = reconcileLocked(isWindowOpen())
+
+    private fun reconcileLocked(windowOpen: Boolean): Reconcile {
         if (!storageReadable()) return Reconcile(0, 0, -1)
-        var b = 0; var m = 0; var s = 0
-        val open = isWindowOpen()
-        for (item in ledger.byState(ItemState.VERIFIED)) {
-            val p = item.pixelPath ?: continue
-            if (exists(p)) { s++; continue }
-            val freedByGoogle = open && item.id in snapshot && !foundElsewhere(File(p).name)
-            if (freedByGoogle) { ledger.setState(item.id, ItemState.BACKED_UP); b++ }
-            else { ledger.setState(item.id, ItemState.MISSING_UNKNOWN); m++ }
-        }
-        return Reconcile(b, m, s)
+        val verified = ledger.byState(ItemState.VERIFIED)
+        val gone = verified.filter { it.pixelPath != null && !exists(it.pixelPath) }
+        val still = verified.size - gone.size
+        if (gone.isEmpty()) return Reconcile(0, 0, still)
+        refreshElsewhere()
+        val candidates = gone.filter { windowOpen && it.id in snapshot && !foundElsewhere(File(it.pixelPath!!).name, it.size) }
+        val batch = candidates.sumOf { it.size }
+        // Did the space really come back? (80%: filesystem blocks, thumbnails, rounding)
+        val fb = freeBytes
+        val spaceConfirms = candidates.isNotEmpty() &&
+            (fb == null || fb() - freeAtOpen + storedSinceOpen >= ((acceptedBytes + batch) * 8) / 10)
+        val backed = if (spaceConfirms) candidates.map { it.id }.toSet() else emptySet()
+        if (spaceConfirms) acceptedBytes += batch
+        val updates = gone.associate { it.id to if (it.id in backed) ItemState.BACKED_UP else ItemState.MISSING_UNKNOWN }
+        ledger.setStates(updates)
+        return Reconcile(backed.size, gone.size - backed.size, still)
     }
 }

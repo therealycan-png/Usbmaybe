@@ -63,8 +63,8 @@ class TransferService : Service() {
             ACTION_DELETE -> pendingDelete?.let { src -> pendingDelete = null; launch { runDelete(src) } }
             ACTION_FINISH -> launch { finalWave() }
             ACTION_STOP -> { cancel = true }
-            ACTION_RECV_ON -> Thread { startReceiver() }.start()
-            ACTION_RECV_OFF -> stopReceiver()
+            ACTION_RECV_ON -> { starting = true; stopRequested = false; Thread { startReceiver() }.start() }
+            ACTION_RECV_OFF -> { stopRequested = true; stopReceiver() }
         }
         main.post { maybeStop() }
         return START_NOT_STICKY
@@ -89,7 +89,10 @@ class TransferService : Service() {
 
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
 
-    private fun busy() = worker?.isAlive == true || receiver != null
+    @Volatile private var starting = false
+    @Volatile private var stopRequested = false
+
+    private fun busy() = worker?.isAlive == true || receiver != null || starting
 
     private fun maybeStop() {
         if (!busy()) { @Suppress("DEPRECATION") stopForeground(true); stopSelf() }
@@ -185,6 +188,7 @@ class TransferService : Service() {
     private fun runDelete(src: MediaSource) {
         val r = Hub.run
         r.active = true; r.title = "Deleting from ${src.suggestedLabel}"; r.detail = "Reading device…"
+        if (!src.canDelete) { r.title = "Not deleting"; r.detail = "This device has no serial number, so it can't be safely identified."; return }
         val ok = Hub.ledger.deletableFor(src.deviceKey).associateBy { it.itemKey }
         val entries = src.list { r.detail = "Reading device… $it" }.filter { it.itemKey in ok }
         r.total = entries.size; r.done = 0; r.bytesDone = 0; r.bytesTotal = entries.sumOf { it.approxSize }; r.failed = 0
@@ -205,9 +209,15 @@ class TransferService : Service() {
     private var waveThread: Thread? = null
 
     private fun startReceiver() {
-        try { startReceiverInner() } catch (e: Exception) {
+        try {
+            startReceiverInner()
+            if (stopRequested) stopReceiver() // switched off while it was starting
+        } catch (e: Exception) {
             receiver?.stop(); receiver = null; pairingCode = null
             Hub.run.title = "Couldn't start receiving"; Hub.run.detail = "${e.message}. Turn the switch off and on, or restart the Pixel."
+            main.post { syncLocks(); maybeStop() }
+        } finally {
+            starting = false
             main.post { syncLocks(); maybeStop() }
         }
     }
@@ -239,7 +249,7 @@ class TransferService : Service() {
         updateNotif(force = true)
     }
 
-    private fun stopReceiver() {
+    @Synchronized private fun stopReceiver() {
         receiver?.stop(); receiver = null; pairingCode = null
         wifiLock?.let { if (it.isHeld) it.release() }; wifiLock = null
         syncLocks()

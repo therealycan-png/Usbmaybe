@@ -40,6 +40,8 @@ interface Ledger {
     fun get(id: Long): Item?
     fun insert(item: Item): Item
     fun setState(id: Long, state: ItemState)
+    /** Many state changes in one go (one transaction on Android). */
+    fun setStates(updates: Map<Long, ItemState>) { updates.forEach { (id, st) -> setState(id, st) } }
     /** Only used to replace a MISSING_UNKNOWN row when the file is sent again. */
     fun remove(id: Long)
     fun byState(state: ItemState): List<Item>

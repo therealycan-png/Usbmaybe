@@ -27,6 +27,8 @@ class MtpSource private constructor(
 ) : MediaSource {
 
     override val kind = "usb"
+    /** Without a serial number two identical phones could look alike, so never delete from them. */
+    override val canDelete: Boolean get() = !serial.startsWith("noserial-")
 
     private val info = mtp.deviceInfo
     private val serial = info?.serialNumber?.takeIf { it.isNotBlank() } ?: usb.serialNumberSafe()?.takeIf { it.isNotBlank() }
@@ -131,7 +133,8 @@ class MtpSource private constructor(
             var off = 0L
             while (true) {
                 val n = try { mtp.getPartialObject64(h, off, CHUNK.toLong(), buf) } catch (e: IOException) {
-                    if (off == 0L) return false else throw e
+                    if (off == 0L) return false
+                    break // some devices error instead of returning 0 at the end; Mp4Check verifies completeness
                 }
                 if (n <= 0) break
                 o.write(buf, 0, n.toInt()); off += n

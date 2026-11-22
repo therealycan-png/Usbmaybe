@@ -79,7 +79,11 @@ class MainActivity : Activity() {
 
     /** You chose to run Free up space: open the short window, then go to Google Photos. */
     private fun freeUpNow() {
-        Hub.tracker.openFreeUpWindow()
+        if (FreeUpService.instance != null) {
+            FreeUpService.watchManual = true // window opens only when Google's confirm button is pressed
+        } else {
+            thread { Hub.tracker.openFreeUpWindow(); Hub.watchWindow() }
+        }
         packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) }
             ?: toast("Google Photos is not installed")
         toast("In Google Photos: profile picture > Free up space > confirm")
@@ -256,7 +260,9 @@ class MainActivity : Activity() {
         delete.add(h("Delete from $label"))
         delete.add(p("${items.size} files (${fmt(items.sumOf { it.size })}) are confirmed backed up by Google Photos and can be removed from $label." +
             if (waiting > 0) "\n$waiting more are on the Pixel waiting for Google backup (kept on $label for now)." else ""))
-        if (items.isNotEmpty()) delete.add(btn("Delete ${items.size} transferred files from $label") { confirmDelete(label, items.size, items.sumOf { it.size }) })
+        if (Hub.source?.canDelete == false) {
+            delete.add(p("This device doesn't report a serial number, so PixelFerry won't delete from it (it can't be sure it's the same device). Delete these from the device itself."))
+        } else if (items.isNotEmpty()) delete.add(btn("Delete ${items.size} transferred files from $label") { confirmDelete(label, items.size, items.sumOf { it.size }) })
         if (waiting > 0 && !Hub.run.active) delete.add(btn("Finish: get the last $waiting confirmed by Google now") {
             TransferService.send(this, TransferService.ACTION_FINISH)
         })

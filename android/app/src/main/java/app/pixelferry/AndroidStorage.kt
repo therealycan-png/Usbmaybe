@@ -24,18 +24,26 @@ class AndroidStorage(private val ctx: Context) : PixelStorage {
             ctx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == android.content.pm.PackageManager.PERMISSION_GRANTED &&
             rootDir().list() != null
 
-    private var nameIndex: Set<String> = emptySet()
-    private var indexedAt = 0L
+    private var index: Set<String> = emptySet()
+
+    /** Fresh list of name+size of every media file OUTSIDE DCIM/PixelFerry. */
+    @Synchronized fun refreshElsewhere() {
+        val ext = Environment.getExternalStorageDirectory()
+        val mine = rootDir().canonicalFile
+        val roots = listOf("DCIM", "Pictures", "Download", "Movies").map { File(ext, it) }
+        index = roots.flatMap { r ->
+            r.walkTopDown().onEnter { it.canonicalFile != mine }.maxDepth(6).filter { it.isFile }.map { "${it.name}|${it.length()}" }.toList()
+        }.toHashSet()
+    }
 
     /** Was a vanished file merely moved (e.g. by a cleaner app) rather than freed by Google? */
-    @Synchronized fun existsElsewhere(name: String): Boolean {
-        if (System.currentTimeMillis() - indexedAt > 30_000) {
-            val ext = Environment.getExternalStorageDirectory()
-            val roots = listOf("DCIM", "Pictures", "Download", "Movies").map { File(ext, it) }
-            nameIndex = roots.flatMap { r -> r.walkTopDown().maxDepth(6).filter { it.isFile }.map { it.name }.toList() }.toHashSet()
-            indexedAt = System.currentTimeMillis()
-        }
-        return name in nameIndex
+    @Synchronized fun existsElsewhere(name: String, size: Long): Boolean = "$name|$size" in index
+
+    override fun syncDir(dir: File) {
+        try {
+            val fd = android.system.Os.open(dir.path, android.system.OsConstants.O_RDONLY, 0)
+            try { android.system.Os.fsync(fd) } finally { android.system.Os.close(fd) }
+        } catch (_: Exception) {}
     }
 
     override fun publish(file: File, mime: String, dateTakenMs: Long) {

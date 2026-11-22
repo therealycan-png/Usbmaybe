@@ -12,7 +12,16 @@ interface PixelStorage {
     fun freeBytes(): Long
     /** Called once the final file is in place (Android: media-scan it so Google Photos sees it). */
     fun publish(file: File, mime: String, dateTakenMs: Long)
+    /** Make the folder entry (the rename) durable. */
+    fun syncDir(dir: File) {
+        try { FileChannel.open(dir.toPath(), StandardOpenOption.READ).use { it.force(true) } } catch (_: Exception) {}
+    }
 }
+
+/** A video Google Photos will never back up (over 10 GB): keeping it on the Pixel would block the waves. */
+class TooBigForGoogle(name: String, len: Long) : IOException("$name is ${len / (1L shl 30)} GB: Google Photos can't back up videos over 10 GB. Kept on the source.")
+
+const val GOOGLE_MAX_BYTES = 10L * 1024 * 1024 * 1024
 
 /** Pass as size when the source cannot report it (PTP objects over 4 GB). */
 const val UNKNOWN_SIZE = -1L
@@ -39,6 +48,8 @@ class IngestEngine(
     /** Always keep this much free so Android and Google Photos keep working. */
     val reserveBytes: Long = 1_500L * 1024 * 1024,
     private val exists: (String) -> Boolean = { File(it).exists() },
+    /** Told about every stored file (BackupTracker uses it to account for free space). */
+    var onStored: (Long) -> Unit = {},
 ) {
     private val lock = Any()
     /** Bytes promised to transfers in progress (USB job + Wi-Fi uploads at the same time). */
@@ -84,6 +95,7 @@ class IngestEngine(
             // Force the bytes onto flash BEFORE we verify or record anything (power loss safety).
             RandomAccessFile(tmp, "rw").use { it.fd.sync() }
             val len = tmp.length()
+            if (len > GOOGLE_MAX_BYTES) throw TooBigForGoogle(originalName, len)
             if (sizeKnown && len != size) throw VerifyFailed("$originalName: size $len != expected $size")
             if (!sizeKnown && !(MediaTypes.isVideo(originalName) && Mp4Check.isComplete(tmp))) {
                 throw VerifyFailed("$originalName: over 4 GB and arrived incomplete")
@@ -111,7 +123,7 @@ class IngestEngine(
                 }
                 val target = Naming.uniqueFile(dir, Naming.targetName(profile.owner, profile.label, originalName))
                 if (!tmp.renameTo(target)) throw IOException("rename failed for $target")
-                syncDir(dir)
+                storage.syncDir(dir)
                 if (dateTakenMs > 0) target.setLastModified(dateTakenMs)
                 val item = try {
                     ledger.insert(
@@ -123,6 +135,7 @@ class IngestEngine(
                     target.delete() // never leave a file the ledger doesn't know about
                     throw IOException("could not record ${target.name}: ${e.message}", e)
                 }
+                onStored(len)
                 storage.publish(target, MediaTypes.mimeFor(target.name), dateTakenMs)
                 return IngestResult.Stored(item)
             }
@@ -130,10 +143,6 @@ class IngestEngine(
             if (tmp.exists()) tmp.delete()
             synchronized(lock) { inFlight -= need }
         }
-    }
-
-    private fun syncDir(dir: File) {
-        try { FileChannel.open(dir.toPath(), StandardOpenOption.READ).use { it.force(true) } } catch (_: Exception) {}
     }
 
     /** Remove temp files left by a crashed earlier run (never ones being written now). */

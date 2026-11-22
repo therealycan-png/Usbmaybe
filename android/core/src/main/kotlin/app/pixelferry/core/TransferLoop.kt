@@ -80,6 +80,8 @@ class TransferLoop(
                     }
                     wave.fileStored()
                     break
+                } catch (ex: TooBigForGoogle) {
+                    p.failed++; p.errors += ex.message ?: e.name; break
                 } catch (ex: NotEnoughSpace) {
                     if (!wave.awaitRoom(e.approxSize, cancelled, waveSleepMs)) return LoopEnd.CANCELLED
                 } catch (ex: VerifyFailed) {

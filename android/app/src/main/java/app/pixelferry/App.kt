@@ -28,13 +28,15 @@ class App : Application() {
 object Hub {
     val ledger by lazy { SqliteLedger(App.instance) }
     val storage by lazy { AndroidStorage(App.instance) }
-    val engine by lazy { IngestEngine(storage, ledger) }
+    val engine by lazy { IngestEngine(storage, ledger).also { e -> e.onStored = { tracker.noteStored(it) } } }
     val tracker by lazy {
         val prefs = App.instance.getSharedPreferences("pf", 0)
         BackupTracker(ledger,
             onWindowChanged = { prefs.edit().putLong("windowUntil", it).apply() },
             storageReadable = { storage.isReadable() },
-            foundElsewhere = { name -> storage.existsElsewhere(name) })
+            refreshElsewhere = { storage.refreshElsewhere() },
+            foundElsewhere = { name, size -> storage.existsElsewhere(name, size) },
+            freeBytes = { storage.freeBytes() })
     }
     val wave by lazy { WaveCoordinator(engine, tracker, PhotosWatcher.Signals, FreeUpController, Notifs) }
 
@@ -42,6 +44,14 @@ object Hub {
     @Volatile var source: MediaSource? = null
 
     val run = RunState()
+
+    /** Check for freed files every 15 s while a free-up window is open, even when no wave is waiting. */
+    fun watchWindow() {
+        Thread {
+            while (tracker.isWindowOpen()) { try { tracker.reconcile() } catch (_: Exception) {}; Thread.sleep(15_000) }
+            try { tracker.reconcile() } catch (_: Exception) {}
+        }.apply { isDaemon = true; start() }
+    }
 }
 
 /** Live status shown by the UI. */

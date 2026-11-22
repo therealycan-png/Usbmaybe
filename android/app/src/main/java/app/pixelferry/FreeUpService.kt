@@ -23,13 +23,25 @@ class FreeUpService : AccessibilityService() {
     private var clicks = 0
     private var lastClick = 0L
     private var lastScan = 0L
+    @Volatile private var busy = false
 
     override fun onServiceConnected() { instance = this }
     override fun onDestroy() { instance = null; super.onDestroy() }
     override fun onInterrupt() {}
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (!armed || event?.packageName?.toString() != PhotosWatcher.PHOTOS) return
+        if (event?.packageName?.toString() != PhotosWatcher.PHOTOS) return
+        // Manual mode: you press Google's own confirm button; we only watch for that click.
+        if (watchManual && event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            val t = event.text?.joinToString(" ")?.trim() ?: event.contentDescription?.toString()?.trim()
+            if (t != null && CONFIRM.matches(t)) {
+                watchManual = false
+                Thread { Hub.tracker.openFreeUpWindow(); Hub.watchWindow() }.start()
+            }
+            return
+        }
+        if (!armed) return
+        if (busy) return
         val now = System.currentTimeMillis()
         if (now - lastClick < 1200 || now - lastScan < 700) return // keep the main thread free
         lastScan = now
@@ -45,9 +57,17 @@ class FreeUpService : AccessibilityService() {
 
         // 1) The final confirm button: "Free up 3.2 GB" / "Free up"
         all.firstOrNull { n -> label(n)?.let { CONFIRM.matches(it) } == true && clickableSelfOrParent(n) != null }
-            ?.let {
-                Hub.tracker.openFreeUpWindow() // Google's own confirm is being pressed now
-                click(it); main.postDelayed({ finish(true, "freed") }, 6000); return
+            ?.let { node ->
+                busy = true
+                Thread {
+                    Hub.tracker.openFreeUpWindow() // snapshot BEFORE Google's confirm is pressed (off the main thread)
+                    main.post {
+                        busy = false
+                        if (click(node)) { Hub.watchWindow(); main.postDelayed({ finish(true, "freed") }, 6000) }
+                        else Hub.tracker.closeWindow()
+                    }
+                }.start()
+                return
             }
         // 2) The menu entry: "Free up space" / "Free up device storage"
         all.firstOrNull { n -> label(n)?.lowercase()?.let { l -> MENU.any { l.contains(it) } } == true }
@@ -71,11 +91,11 @@ class FreeUpService : AccessibilityService() {
         return null
     }
 
-    private fun click(n: AccessibilityNodeInfo) {
-        val target = clickableSelfOrParent(n) ?: return
-        if (!target.isVisibleToUser) return
+    private fun click(n: AccessibilityNodeInfo): Boolean {
+        val target = clickableSelfOrParent(n) ?: return false
+        if (!target.isVisibleToUser) return false
         clicks++; lastClick = System.currentTimeMillis()
-        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        return target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     }
 
     private fun finish(ok: Boolean, why: String) {
@@ -97,6 +117,8 @@ class FreeUpService : AccessibilityService() {
     companion object {
         @Volatile var instance: FreeUpService? = null
         @Volatile var armed = false
+        /** Set when you chose "Free up now" yourself: the window opens when we see you press Google's confirm. */
+        @Volatile var watchManual = false
         private val CONFIRM = Regex("(?i)^free up([\\s\\u00A0]+[0-9.,]+[\\s\\u00A0]*(kb|mb|gb|tb))?$")
         private val MENU = listOf("free up space", "free up device storage", "free up storage")
         private val ACCOUNT = listOf("account", "profile")

@@ -257,3 +257,53 @@ class SafetyRegressionTest {
         assertTrue(eng.hasRoomFor(250_000))
     }
 }
+
+class Round2SafetyTest {
+    private val mom = DeviceProfile("dev-iphone", "Mom", "iPhone 13")
+
+    private fun setup(): Triple<IngestEngine, MemoryLedger, BackupTracker> {
+        val root = tempDir(); val ledger = MemoryLedger()
+        val storage = FakeStorage(root, capacity = 10_000_000)
+        val eng = IngestEngine(storage, ledger, reserveBytes = 0)
+        val tracker = BackupTracker(ledger, freeBytes = storage::freeBytes)
+        eng.onStored = tracker::noteStored
+        return Triple(eng, ledger, tracker)
+    }
+
+    private fun IngestEngine.put(key: String, n: Int, seed: Int) =
+        (ingest(mom, key, "$key.jpg", n.toLong(), 0, null) { it.writeBytes(ByteArray(n) { b -> (b * seed).toByte() }) } as IngestResult.Stored).item
+
+    @Test fun deleted_between_waves_never_counts_as_backed_up() {
+        val (eng, ledger, tracker) = setup()
+        val a = eng.put("a", 5000, 3)
+        File(a.pixelPath!!).delete()     // gone BEFORE any free-up
+        tracker.openFreeUpWindow()
+        tracker.reconcile()
+        assertEquals(ItemState.MISSING_UNKNOWN, ledger.get(a.id)!!.state)
+    }
+
+    @Test fun trashed_inside_window_without_freeing_space_is_not_backed_up() {
+        val (eng, ledger, tracker) = setup()
+        val a = eng.put("a", 50_000, 5)
+        val trash = File(tempDir(), "trash").apply { mkdirs() }
+        tracker.openFreeUpWindow()
+        // user trashes it in a gallery: moved on the same storage -> FakeStorage space would NOT change
+        // (simulate by writing an equal-size file inside the Pixel root while removing the original)
+        val bin = File(File(a.pixelPath!!).parentFile.parentFile, ".trashed-a.jpg"); File(a.pixelPath!!).renameTo(bin)
+        tracker.reconcile()
+        assertEquals(ItemState.MISSING_UNKNOWN, ledger.get(a.id)!!.state, "no space came back -> not Google")
+        assertTrue(trash.exists())
+    }
+
+    @Test fun real_free_up_is_accepted_even_while_new_files_arrive() {
+        val (eng, ledger, tracker) = setup()
+        val a = eng.put("a", 80_000, 7)
+        tracker.openFreeUpWindow()
+        val b = eng.put("b", 60_000, 9)   // a Wi-Fi upload lands during the window
+        File(a.pixelPath!!).delete()      // Google frees a
+        tracker.reconcile()
+        assertEquals(ItemState.BACKED_UP, ledger.get(a.id)!!.state)
+        assertEquals(ItemState.VERIFIED, ledger.get(b.id)!!.state)
+    }
+
+}
