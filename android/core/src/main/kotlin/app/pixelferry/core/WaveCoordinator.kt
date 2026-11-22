@@ -53,18 +53,29 @@ class WaveCoordinator(
 
     fun fileStored() { lastFileAt = clock() }
 
-    fun beginWait(bytes: Long) {
+    private var goal: () -> Boolean = { true }
+
+    @Synchronized fun beginWait(bytes: Long) {
         if (phase == Phase.WAITING) { neededBytes = maxOf(neededBytes, bytes); return }
-        phase = Phase.WAITING; neededBytes = bytes
-        waitStarted = clock(); attempts = 0; lastAttempt = 0; stuckReported = false
+        start(bytes) { engine.hasRoomFor(neededBytes) }
         notifier.waiting(bytes, engine.freeBytes(), 0)
     }
 
-    /** One step of the waiting loop. @return true when there is room again. */
-    fun tick(): Boolean {
+    /** Final wave: after the last file, get everything still on the Pixel confirmed by Google. */
+    @Synchronized fun beginFinal(remainingOnPixel: () -> Int) {
+        start(0) { remainingOnPixel() == 0 }
+    }
+
+    private fun start(bytes: Long, done: () -> Boolean) {
+        phase = Phase.WAITING; neededBytes = bytes; goal = done
+        waitStarted = clock(); attempts = 0; lastAttempt = 0; stuckReported = false
+    }
+
+    /** One step of the waiting loop. @return true when the goal is reached. */
+    @Synchronized fun tick(): Boolean {
         if (phase == Phase.RUNNING) return true
         tracker.reconcile()
-        if (engine.hasRoomFor(neededBytes)) {
+        if (goal()) {
             phase = Phase.RUNNING; waveNumber++; notifier.resumed(); return true
         }
         val now = clock()
@@ -92,12 +103,23 @@ class WaveCoordinator(
         return false
     }
 
-    /** Blocking wait used by the USB job. */
-    fun awaitRoom(bytes: Long, cancelled: () -> Boolean, sleepMs: Long = 20_000) {
+    /** Blocking wait used by the USB job. @return true if room came back (false = cancelled). */
+    fun awaitRoom(bytes: Long, cancelled: () -> Boolean, sleepMs: Long = 20_000): Boolean {
         beginWait(bytes)
+        return loop(cancelled, sleepMs)
+    }
+
+    fun awaitAllBackedUp(remainingOnPixel: () -> Int, cancelled: () -> Boolean, sleepMs: Long = 20_000): Boolean {
+        beginFinal(remainingOnPixel)
+        return loop(cancelled, sleepMs)
+    }
+
+    private fun loop(cancelled: () -> Boolean, sleepMs: Long): Boolean {
         while (!cancelled()) {
-            if (tick()) return
+            if (tick()) return true
             Thread.sleep(sleepMs)
         }
+        phase = Phase.RUNNING
+        return false
     }
 }

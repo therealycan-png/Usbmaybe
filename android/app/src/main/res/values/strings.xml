@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="freeup_desc">Only acts inside Google Photos, and only while a PixelFerry wave is waiting. It taps Google Photos\' own "Free up space" button so the transfer can continue. Google Photos itself decides what is safe to remove: it only removes photos and videos that are already backed up. PixelFerry never reads your screen at any other time.</string>
+</resources>

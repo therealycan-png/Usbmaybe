@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Still-image (PTP) devices: iPhone, cameras -->
+    <usb-device class="6" />
+    <!-- Apple (iPhone/iPad) -->
+    <usb-device vendor-id="1452" />
+    <!-- MTP phones/tablets (Oppo, OnePlus, Insta360 in MTP mode) expose a vendor-specific interface -->
+    <usb-device class="255" subclass="255" />
+    <!-- USB mass storage (camera in storage mode, SD-card reader) -->
+    <usb-device class="8" />
+</resources>

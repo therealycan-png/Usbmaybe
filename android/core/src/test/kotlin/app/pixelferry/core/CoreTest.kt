@@ -160,3 +160,33 @@ class CoreTest {
         assertEquals("000", Pairing.base32(byteArrayOf(0, 0)).take(3))
     }
 }
+
+class Mp4CheckTest {
+    private fun box(type: String, payload: Int): ByteArray {
+        val size = 8 + payload
+        return byteArrayOf((size ushr 24).toByte(), (size ushr 16).toByte(), (size ushr 8).toByte(), size.toByte()) +
+            type.toByteArray() + ByteArray(payload) { 7 }
+    }
+
+    @Test fun complete_vs_truncated_video() {
+        val d = tempDir()
+        val full = box("ftyp", 16) + box("mdat", 50_000) + box("moov", 900)
+        val ok = File(d, "a.mov").apply { writeBytes(full) }
+        assertTrue(Mp4Check.isComplete(ok))
+        val cut = File(d, "b.mov").apply { writeBytes(full.copyOf(full.size - 300)) }
+        assertFalse(Mp4Check.isComplete(cut))
+        val noMoov = File(d, "c.mov").apply { writeBytes(box("ftyp", 16) + box("mdat", 100)) }
+        assertFalse(Mp4Check.isComplete(noMoov))
+    }
+
+    @Test fun unknown_size_big_video_path() {
+        val root = tempDir(); val ledger = MemoryLedger()
+        val eng = IngestEngine(FakeStorage(root), ledger, reserveBytes = 0)
+        val p = DeviceProfile("ip", "Mom", "iPhone")
+        val full = box("ftyp", 16) + box("mdat", 70_000) + box("moov", 500)
+        val r = eng.ingest(p, "big", "IMG_1.MOV", UNKNOWN_SIZE, 0, null) { it.writeBytes(full) }
+        assertEquals(full.size.toLong(), (r as IngestResult.Stored).item.size)
+        assertFailsWith<VerifyFailed> { eng.ingest(p, "big2", "IMG_2.MOV", UNKNOWN_SIZE, 0, null) { it.writeBytes(full.copyOf(5000)) } }
+        assertFailsWith<VerifyFailed> { eng.ingest(p, "big3", "IMG_3.JPG", UNKNOWN_SIZE, 0, null) { it.writeBytes(full) } }
+    }
+}

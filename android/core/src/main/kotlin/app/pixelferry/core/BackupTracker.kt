@@ -16,11 +16,15 @@ class BackupTracker(
     private val clock: () -> Long = System::currentTimeMillis,
     private val windowMs: Long = 45 * 60 * 1000L,
     private val exists: (String) -> Boolean = { File(it).exists() },
+    /** Persist the window so an app restart mid-free-up doesn't lose it. */
+    private val onWindowChanged: (Long) -> Unit = {},
 ) {
     @Volatile var windowOpenUntil: Long = 0
         private set
 
-    fun openFreeUpWindow() { windowOpenUntil = clock() + windowMs }
+    fun openFreeUpWindow() { windowOpenUntil = clock() + windowMs; onWindowChanged(windowOpenUntil) }
+
+    fun restoreWindow(until: Long) { windowOpenUntil = until }
 
     fun isWindowOpen() = clock() <= windowOpenUntil
 

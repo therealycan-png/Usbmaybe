@@ -11,6 +11,11 @@ interface PixelStorage {
     fun publish(file: File, mime: String, dateTakenMs: Long)
 }
 
+/** Pass as size when the source cannot report it (PTP objects over 4 GB). */
+const val UNKNOWN_SIZE = -1L
+/** Room to reserve for a file of unknown size. */
+const val BIG_FILE_ESTIMATE = 12L * 1024 * 1024 * 1024
+
 class NotEnoughSpace(val needed: Long, val free: Long) : IOException("Pixel full: need $needed, free $free")
 class VerifyFailed(msg: String) : IOException(msg)
 
@@ -43,6 +48,8 @@ class IngestEngine(
      * @param expectedSha256 from the sender if it computed one (Wi-Fi path); null for USB
      *        (USB/MTP has no source hash, so we verify exact size + record the on-disk hash).
      * @param write fills the temp file with the source bytes.
+     * @param size exact size, or [UNKNOWN_SIZE] when the source can't say (PTP files over 4 GB):
+     *        then the video's box structure must be complete instead.
      */
     fun ingest(
         profile: DeviceProfile,
@@ -54,7 +61,9 @@ class IngestEngine(
         write: (File) -> Unit,
     ): IngestResult {
         ledger.find(profile.deviceKey, itemKey)?.let { return IngestResult.AlreadyHave(it) }
-        if (!hasRoomFor(size)) throw NotEnoughSpace(size + reserveBytes, storage.freeBytes())
+        val sizeKnown = size != UNKNOWN_SIZE
+        val need = if (sizeKnown) size else BIG_FILE_ESTIMATE
+        if (!hasRoomFor(need)) throw NotEnoughSpace(need + reserveBytes, storage.freeBytes())
 
         val dir = File(storage.rootDir(), Naming.folderName(profile.owner, profile.label))
         if (!dir.isDirectory && !dir.mkdirs()) throw IOException("Cannot create $dir")
@@ -62,7 +71,10 @@ class IngestEngine(
         try {
             write(tmp)
             val len = tmp.length()
-            if (len != size) throw VerifyFailed("$originalName: size $len != expected $size")
+            if (sizeKnown && len != size) throw VerifyFailed("$originalName: size $len != expected $size")
+            if (!sizeKnown && !(MediaTypes.isVideo(originalName) && Mp4Check.isComplete(tmp))) {
+                throw VerifyFailed("$originalName: large file could not be confirmed complete")
+            }
             val sha = Hashing.sha256(tmp) // read back from flash = verifies what is actually stored
             if (expectedSha256 != null && !sha.equals(expectedSha256, ignoreCase = true)) {
                 throw VerifyFailed("$originalName: checksum mismatch")
@@ -74,7 +86,7 @@ class IngestEngine(
                     tmp.delete()
                     val dup = ledger.insert(
                         Item(deviceKey = profile.deviceKey, itemKey = itemKey, originalName = originalName,
-                            size = size, dateTakenMs = dateTakenMs, pixelPath = null, sha256 = sha,
+                            size = len, dateTakenMs = dateTakenMs, pixelPath = null, sha256 = sha,
                             state = ItemState.DUPLICATE, duplicateOf = original.id)
                     )
                     return IngestResult.Duplicate(dup)
@@ -85,7 +97,7 @@ class IngestEngine(
                 storage.publish(target, MediaTypes.mimeFor(target.name), dateTakenMs)
                 val item = ledger.insert(
                     Item(deviceKey = profile.deviceKey, itemKey = itemKey, originalName = originalName,
-                        size = size, dateTakenMs = dateTakenMs, pixelPath = target.absolutePath,
+                        size = len, dateTakenMs = dateTakenMs, pixelPath = target.absolutePath,
                         sha256 = sha, state = ItemState.VERIFIED)
                 )
                 return IngestResult.Stored(item)
