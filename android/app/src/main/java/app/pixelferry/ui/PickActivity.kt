@@ -42,8 +42,8 @@ class PickActivity : Activity() {
     private lateinit var body: LinearLayout
     private lateinit var modeBox: LinearLayout
     private lateinit var summary: TextView
-    private val owner by lazy { EditText(this).apply { hint = "Whose files? e.g. Mom, Shawn" } }
-    private val label by lazy { EditText(this).apply { hint = "Which device? e.g. iPhone13" } }
+    private val owner by lazy { EditText(this).apply { hint = "e.g. Mom" } }
+    private val label by lazy { EditText(this).apply { hint = "e.g. iPhone13" } }
 
     private var mode = 0 // 0 all, 1 dates, 2 folders, 3 grid
     private var tooBigAccepted = false
@@ -57,18 +57,33 @@ class PickActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val s = src ?: return finish()
-        title = "Send from ${s.suggestedLabel}"
-        body = vbox().apply { setBackgroundColor(0xFFF1F3F4.toInt()) }
-        setContentView(ScrollView(this).apply { addView(body) })
-        body.add(p("Reading ${s.suggestedLabel}… (10,000 photos can take a minute or two)"))
+        actionBar?.hide()
+        window.statusBarColor = C.PRIMARY
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(C.BG))
+        body = vbox(0).apply { setBackgroundColor(C.BG); setPadding(0, 0, 0, dp(16)) }
+        sendBar = vbox(0).apply {
+            setBackgroundColor(C.CARD); elevation = dpf(12f); setPadding(dp(16), dp(10), dp(16), dp(14))
+        }
+        setContentView(vbox(0).apply {
+            setPadding(0, 0, 0, 0); setBackgroundColor(C.BG)
+            addView(ScrollView(context).apply { setBackgroundColor(C.BG); addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(sendBar, LinearLayout.LayoutParams(-1, -2))
+        })
+        val loading = p("Looking through ${s.suggestedLabel}…", 17f)
+        body.add(hero(s.suggestedLabel, "Reading photos and videos", "📱"),
+            card().add(centered(ProgressRing(this).apply { indeterminate = true; center = "" }), loading))
         thread {
-            val list = try { s.list { n -> runOnUiThread { title = "Reading… $n found" } } } catch (e: Exception) {
-                runOnUiThread { body.removeAllViews(); body.add(p("Couldn't read the device: ${e.message}\n\nUnlock it / choose File transfer, then try again.")) }
+            val list = try { s.list { n -> runOnUiThread { loading.text = "Found %,d photos & videos so far…".format(n) } } } catch (e: Exception) {
+                runOnUiThread {
+                    body.removeAllViews()
+                    body.add(hero(s.suggestedLabel, "Can't read it yet", "📱"),
+                        card(C.TINT_AMBER).add(h("Almost there"), p("${e.message}\n\nThen go back and tap the device again.")))
+                }
                 return@thread
             }
             val have = Hub.ledger.forDevice(s.deviceKey).filter { Hub.ledger.isDone(it) }.map { it.itemKey }.toSet()
             listWarnings = (s as? app.pixelferry.sources.MtpSource)?.lastWarnings ?: 0
-            runOnUiThread { entries = list; done = have; title = "Send from ${s.suggestedLabel}"; build() }
+            runOnUiThread { if (!isDestroyed) { entries = list; done = have; build() } }
         }
     }
 
@@ -79,32 +94,67 @@ class PickActivity : Activity() {
         val prefs = getSharedPreferences("pf", 0)
         owner.setText(prof?.owner ?: prefs.getString("lastOwner", "") ?: "")
         label.setText(prof?.label ?: s.suggestedLabel.replace(" ", ""))
-        body.add(card().add(h("Who is this from?"), owner, label,
-            p("Files are tagged like Mom_iPhone13_IMG_1234.HEIC and land in DCIM/PixelFerry/Mom_iPhone13 so you can tell whose phone they came from.", 13f, 0xFF5F6368.toInt())))
+        styleField(owner); styleField(label)
 
         val left = entries.count { it.itemKey !in done }
         val videos = entries.count { MediaTypes.isVideo(it.name) }
-        body.add(card().add(h("On this device"),
-            p("${entries.size} photos & videos (${videos} videos), ${fmt(entries.sumOf { it.approxSize })}.\n" +
-                "${entries.size - left} already transferred earlier. $left new.")))
+        body.add(hero(prof?.let { "${it.owner}'s ${it.label}" } ?: s.suggestedLabel,
+            "%,d photos · %,d videos · %s".format(entries.size - videos, videos, fmt(entries.sumOf { it.approxSize })), "📱"))
+        if (entries.size - left > 0) body.add(card(C.TINT_GREEN).add(
+            chip("✓  %,d already sent before".format(entries.size - left), C.SUCCESS, C.CARD),
+            p("They're skipped automatically. %,d new to send.".format(left), 15f)))
 
         resumeSelection()?.let { keys ->
             val n = entries.count { it.itemKey in keys && it.itemKey !in done }
-            if (n > 0) body.add(btn("Resume last transfer ($n left)", primary = true) {
-                start(entries.filter { it.itemKey in keys })
-            })
+            if (n > 0) body.add(card(C.TINT_BLUE).add(h("Pick up where you left off"),
+                p("%,d files from last time are still to go.".format(n)),
+                btn("Resume (%,d left)".format(n), primary = true) { start(entries.filter { it.itemKey in keys }) }))
         }
 
-        val group = RadioGroup(this)
-        listOf("Everything", "By date range", "By folder / album", "Pick photos myself").forEachIndexed { i, t ->
-            group.addView(RadioButton(this).apply { text = t; id = 100 + i; textSize = 16f })
+        // 1. whose
+        val owners = (Hub.ledger as? app.pixelferry.SqliteLedger)?.devices()?.map { it.owner }?.distinct()?.take(5) ?: emptyList()
+        val whoCard = card().add(h("1. Whose photos?"),
+            p("They'll be tagged like Mom_iPhone13_IMG_1234 so you can find them in Google Photos.", 15f))
+        if (owners.isNotEmpty()) whoCard.addView(hbox().apply {
+            setPadding(0, dp(6), 0, dp(2))
+            owners.forEach { o -> addView(chip(o, C.PRIMARY, C.TINT_BLUE).apply {
+                (layoutParams as LinearLayout.LayoutParams).rightMargin = dp(8)
+                minHeight = dp(40); gravity = android.view.Gravity.CENTER
+                setOnClickListener { owner.setText(o) }
+            }) }
+        })
+        whoCard.add(text("Name", 13f, C.INK2).apply { setPadding(0, dp(10), 0, dp(4)) }, owner,
+            text("Device", 13f, C.INK2).apply { setPadding(0, dp(10), 0, dp(4)) }, label)
+        body.add(whoCard)
+
+        // 2. what
+        modeBox = vbox(0).apply { setPadding(0, dp(6), 0, 0) }
+        summary = text("", 15f, C.INK2)
+        val modes = listOf(Triple("🖼️", "Everything", "All photos & videos"), Triple("📅", "By date", "Pick a range"),
+            Triple("🗂️", "By folder", "Camera, WhatsApp…"), Triple("✋", "Choose myself", "Pick the ones you want"))
+        val grid = vbox(0)
+        modeCards.clear()
+        modes.chunked(2).forEachIndexed { r, row ->
+            grid.addView(hbox().apply {
+                gravity = android.view.Gravity.TOP
+                row.forEachIndexed { c, (sym, t, sub) ->
+                    val i = r * 2 + c
+                    val cell = vbox(14).apply {
+                        isClickable = true; contentDescription = "$t. $sub"
+                        addView(emoji(sym, 26f)); addView(text(t, 16f, C.INK, bold = true)); addView(text(sub, 13.5f, C.INK2))
+                        setPadding(dp(16), dp(16), dp(16), dp(18))
+                        setOnClickListener { mode = i; paintModes(); renderMode() }
+                    }
+                    modeCards += cell
+                    addView(cell, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(if (c == 0) 0 else dp(6), 0, if (c == 0) dp(6) else 0, dp(12)) })
+                }
+            })
         }
-        group.check(100 + mode)
-        group.setOnCheckedChangeListener { _, id -> mode = id - 100; renderMode() }
-        modeBox = vbox(0)
-        summary = p(size = 16f, color = 0xFF1A73E8.toInt())
-        body.add(card().add(h("What to send"), group, modeBox, summary))
-        body.add(btn("Start transfer", primary = true) { start(selection()) })
+        body.add(card().add(h("2. What to send?"), grid, modeBox))
+        paintModes()
+
+        sendBar.removeAllViews()
+        sendBar.add(summary, btn("Send", primary = true) { start(selection()) }.also { sendBtn = it })
         renderMode()
     }
 
@@ -118,7 +168,31 @@ class PickActivity : Activity() {
     private fun updateSummary() {
         val sel = selection()
         val new = sel.filter { it.itemKey !in done }
-        summary.text = "Selected ${sel.size} (${fmt(sel.sumOf { it.approxSize })}). New to send: ${new.size} (${fmt(new.sumOf { it.approxSize })})."
+        summary.text = if (sel.size == new.size) "%,d selected".format(sel.size) else "%,d selected · %,d already sent".format(sel.size, sel.size - new.size)
+        sendBtn?.text = if (new.isEmpty()) "Nothing new to send" else "Send %,d · %s  →".format(new.size, fmt(new.sumOf { it.approxSize }))
+        sendBtn?.isEnabled = new.isNotEmpty()
+        sendBtn?.alpha = if (new.isEmpty()) 0.5f else 1f
+    }
+
+    private val modeCards = ArrayList<LinearLayout>()
+    private var sendBtn: android.widget.Button? = null
+    private lateinit var sendBar: LinearLayout
+
+    private fun paintModes() = modeCards.forEachIndexed { i, v ->
+        v.background = ripple(rounded(if (i == mode) C.TINT_BLUE else C.CARD, dpf(18f), dp(2), if (i == mode) C.PRIMARY else C.LINE),
+            rounded(android.graphics.Color.BLACK, dpf(18f)))
+    }
+
+    private fun needSetup(why: String) {
+        android.app.AlertDialog.Builder(this).setTitle("One quick step first").setMessage(why)
+            .setPositiveButton("Do it now") { _, _ -> startActivity(android.content.Intent(this, SetupActivity::class.java)) }
+            .setNegativeButton("Later", null).show()
+    }
+
+    private fun styleField(e: EditText) {
+        e.textSize = 18f; e.setTextColor(C.INK); e.setHintTextColor(C.INK2); e.setSingleLine()
+        e.background = rounded(C.BG, dpf(14f), dp(1), C.LINE); e.setPadding(dp(14), dp(12), dp(14), dp(12))
+        e.minHeight = dp(52)
     }
 
     private val df = SimpleDateFormat("d MMM yyyy", Locale.getDefault())
@@ -135,13 +209,14 @@ class PickActivity : Activity() {
                         renderMode()
                     }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show()
                 }
-                modeBox.add(btn("From: " + (from?.let { df.format(Date(it)) } ?: "the beginning")) { pick(true) })
-                modeBox.add(btn("To: " + (until?.let { df.format(Date(it - 1)) } ?: "today")) { pick(false) })
+                modeBox.add(btn("From  " + (from?.let { df.format(Date(it)) } ?: "the very first photo")) { pick(true) })
+                modeBox.add(btn("To  " + (until?.let { df.format(Date(it - 1)) } ?: "today")) { pick(false) })
             }
             2 -> entries.groupBy { it.folder }.toSortedMap().forEach { (f, list) ->
                 modeBox.add(CheckBox(this).apply {
-                    text = "${f.ifEmpty { "(top level)" }}  ·  ${list.size} items, ${fmt(list.sumOf { it.approxSize })}"
-                    isChecked = f in folders; textSize = 15f
+                    text = "${f.ifEmpty { "(top level)" }}\n%,d items · %s".format(list.size, fmt(list.sumOf { it.approxSize }))
+                    isChecked = f in folders; textSize = 16f; setTextColor(C.INK); minHeight = dp(56)
+                    buttonTintList = android.content.res.ColorStateList.valueOf(C.PRIMARY)
                     setOnCheckedChangeListener { _, c -> if (c) folders += f else folders -= f; updateSummary() }
                 })
             }
@@ -218,10 +293,10 @@ class PickActivity : Activity() {
         if (o.isEmpty() || l.isEmpty()) { owner.error = if (o.isEmpty()) "Needed for the divider" else null; label.error = if (l.isEmpty()) "Needed" else null; return }
         if (sel.isEmpty()) { summary.text = "Nothing selected."; return }
         if (checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            summary.text = "First allow 'Save photos to the Pixel' in the setup checklist."; return
+            needSetup("PixelFerry needs permission to save photos on this Pixel first."); return
         }
         if (!getSharedPreferences("pf", 0).getBoolean("qualityOriginal", false)) {
-            summary.text = "First confirm Google Photos is set to 'Original quality' (setup checklist), so nothing gets compressed."; return
+            needSetup("First check that Google Photos backs up in Original quality, so nothing gets compressed."); return
         }
         val tooBig = sel.filter { it.size > GOOGLE_MAX_VIDEO }
         val sendable = sel - tooBig.toSet()

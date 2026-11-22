@@ -46,4 +46,5 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation(kotlin("test"))
+    testImplementation("com.google.android.apps.common.testing.accessibility.framework:accessibility-test-framework:4.1.1")
 }

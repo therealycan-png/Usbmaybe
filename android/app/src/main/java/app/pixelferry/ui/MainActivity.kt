@@ -1,6 +1,5 @@
 package app.pixelferry.ui
 
-import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.PendingIntent
@@ -8,7 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.net.Uri
@@ -16,32 +15,38 @@ import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
-import android.provider.Settings
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
-import android.widget.Switch
 import android.widget.Toast
 import app.pixelferry.FreeUpService
 import app.pixelferry.Hub
 import app.pixelferry.PhotosWatcher
 import app.pixelferry.TransferService
 import app.pixelferry.TransferService.Companion.fmt
+import app.pixelferry.core.Item
 import app.pixelferry.core.ItemState
+import app.pixelferry.core.WaveCoordinator
 import app.pixelferry.sources.MtpSource
 import app.pixelferry.sources.SafSource
 import kotlin.concurrent.thread
 
+/**
+ * Home: what's happening now (big progress ring), where to send from (big tiles),
+ * and what can be cleaned up (delete card). Everything else is one tap away.
+ */
 class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
-    private lateinit var root: LinearLayout
-    private lateinit var status: LinearLayout
-    private lateinit var setup: LinearLayout
-    private lateinit var sources: LinearLayout
-    private lateinit var computer: LinearLayout
-    private lateinit var delete: LinearLayout
     private val usb by lazy { getSystemService(UsbManager::class.java) }
+    private lateinit var root: LinearLayout
+    private lateinit var heroBox: LinearLayout
+    private lateinit var setupBox: LinearLayout
+    private lateinit var runBox: LinearLayout
+    private lateinit var deleteBox: LinearLayout
+    private lateinit var computerBox: LinearLayout
+    private lateinit var sourcesBox: LinearLayout
 
     private val permReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -56,147 +61,164 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "PixelFerry"
-        root = vbox().apply { setBackgroundColor(0xFFF1F3F4.toInt()) }
-        status = card(); setup = card(); sources = card(); computer = card(); delete = card()
-        root.add(status, sources, delete, computer, setup, helpCard())
-        setContentView(ScrollView(this).apply { addView(root); isFillViewport = true })
+        actionBar?.hide()
+        window.statusBarColor = C.PRIMARY
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(C.BG))
+        heroBox = LinearLayout(this); setupBox = vbox(0); runBox = vbox(0); deleteBox = vbox(0); computerBox = vbox(0); sourcesBox = vbox(0)
+        root = vbox(0).apply {
+            setBackgroundColor(C.BG); setPadding(0, 0, 0, dp(24))
+            add(heroBox, setupBox, runBox, deleteBox, computerBox, sourcesBox, helpTile())
+        }
+        setContentView(ScrollView(this).apply { isFillViewport = true; setBackgroundColor(C.BG); addView(root) })
         registerReceiver(permReceiver, IntentFilter(ACTION_USB_PERMISSION))
         registerReceiver(attachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED).apply {
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED) })
-        if (savedInstanceState == null) handleIntent(intent)
+        if (savedInstanceState == null) {
+            handleIntent(intent)
+            if (!getSharedPreferences("pf", 0).getBoolean("setupDone", false) && SetupActivity.remaining(this) > 0)
+                startActivity(Intent(this, SetupActivity::class.java))
+        }
     }
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIntent(intent) }
+    override fun onDestroy() { unregisterReceiver(permReceiver); unregisterReceiver(attachReceiver); super.onDestroy() }
+    override fun onResume() { super.onResume(); renderAll(); tick() }
+    override fun onPause() { ui.removeCallbacksAndMessages(null); super.onPause() }
+
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
+
+    private fun renderAll() { renderHero(); renderSetup(); renderSources(); renderComputer(); renderDelete() }
 
     private fun handleIntent(i: Intent?) {
         when (i?.action) {
-            UsbManager.ACTION_USB_DEVICE_ATTACHED -> handleUsbIntent(i)
+            UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                @Suppress("DEPRECATION") val d = i.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+                if (d != null && usb.hasPermission(d)) openUsb(d)
+            }
             ACTION_FREE_UP_NOW -> freeUpNow()
         }
         setIntent(Intent(this, MainActivity::class.java)) // never re-handle on rotation
     }
 
-    /** You chose to run Free up space: open the short window, then go to Google Photos. */
-    private fun freeUpNow() {
-        if (FreeUpService.instance != null) {
-            FreeUpService.watchManual = true // window opens only when Google's confirm button is pressed
-        } else {
-            thread { Hub.tracker.openFreeUpWindow(); Hub.watchWindow() }
-        }
-        packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) }
-            ?: toast("Google Photos is not installed")
-        toast("In Google Photos: profile picture > Free up space > confirm")
+    // ---------------- hero ----------------
+    private fun renderHero() {
+        heroBox.removeAllViews()
+        val free = try { fmt(Hub.storage.freeBytes()) } catch (_: Exception) { "?" }
+        heroBox.addView(hero("PixelFerry", "Full-quality photos into Google Photos", "⛴️").apply {
+            addView(chip("$free free on this Pixel", android.graphics.Color.WHITE, 0x40000000).apply {
+                (layoutParams as LinearLayout.LayoutParams).topMargin = dp(14) })
+        }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) })
     }
 
-    override fun onDestroy() { unregisterReceiver(permReceiver); unregisterReceiver(attachReceiver); super.onDestroy() }
-
-    override fun onResume() {
-        super.onResume()
-        renderSetup(); renderSources(); renderComputer(); renderDelete(); tick()
+    // ---------------- setup banner ----------------
+    private fun renderSetup() {
+        setupBox.removeAllViews()
+        val left = SetupActivity.remaining(this)
+        if (left == 0) return
+        setupBox.addView(tile("🧭", C.TINT_AMBER, "Finish setup", "$left quick step${if (left > 1) "s" else ""} left, about a minute", highlight = true) {
+            startActivity(Intent(this, SetupActivity::class.java))
+        })
     }
 
-    override fun onPause() { ui.removeCallbacksAndMessages(null); super.onPause() }
-
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
-
-    private fun handleUsbIntent(i: Intent?) {
-        if (i?.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
-        @Suppress("DEPRECATION") val d = i.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE) ?: return
-        if (usb.hasPermission(d)) openUsb(d)
+    // ---------------- live run card ----------------
+    private val ring by lazy { ProgressRing(this) }
+    private val runTitle by lazy { h("") }
+    private val runChip by lazy { chip("", C.PRIMARY, C.TINT_BLUE) }
+    private val runDetail by lazy { p() }
+    private val stats by lazy { statRow("" to "files", "" to "speed", "" to "time left") }
+    private var filesLabel: android.widget.TextView? = null
+    private val freeBtn by lazy { btn("Free up space now", primary = true) { freeUpNow() } }
+    private val stopBtn by lazy { link("Stop", C.DANGER) { confirmStop() } }
+    private val runCard by lazy {
+        card().add(runChip, runTitle, centered(ring).apply { setPadding(0, dp(12), 0, dp(4)) }, stats, runDetail, freeBtn, stopBtn)
     }
-
-    // ---------- live status ----------
-    private val bar by lazy { ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal) }
-    private val stTitle by lazy { h("") }
-    private val stDetail by lazy { p() }
-    private val freeBtn by lazy { btn("Free up space now (Google Photos)", primary = true) { freeUpNow() } }
-    private val stCounts by lazy { p(size = 14f, color = 0xFF5F6368.toInt()) }
 
     private fun tick() {
         val r = Hub.run
-        if (status.childCount == 0) {
-            status.add(stTitle, bar, stCounts, stDetail, freeBtn,
-                btn("Stop") { TransferService.send(this, TransferService.ACTION_STOP) })
+        val showRun = r.active || r.total > 0
+        if (showRun && runCard.parent == null) runBox.addView(runCard)
+        if (!showRun && runCard.parent != null) runBox.removeView(runCard)
+        if (showRun) {
+            val waiting = Hub.wave.phase == WaveCoordinator.Phase.WAITING
+            val (chipText, fg, bg) = when {
+                !r.active && r.title.startsWith("Done") -> Triple("✓  Finished", C.SUCCESS, C.TINT_GREEN)
+                !r.active -> Triple("Paused", C.WARN, C.TINT_AMBER)
+                waiting -> Triple("☁  Waiting for Google backup", C.WARN, C.TINT_AMBER)
+                else -> Triple("●  Transferring", C.PRIMARY, C.TINT_BLUE)
+            }
+            runChip.text = chipText; runChip.setTextColor(fg); runChip.background = rounded(bg, dpf(14f))
+            runTitle.text = r.title
+            runDetail.text = r.detail + if (r.errors.isNotEmpty()) "\n\n⚠ ${r.errors.takeLast(2).joinToString("\n")}" else ""
+            val frac = if (r.bytesTotal > 0) r.bytesDone.toFloat() / r.bytesTotal else 0f
+            ring.indeterminate = r.active && r.total == 0
+            ring.fraction = frac
+            ring.center = "${(frac * 100).toInt()}%"
+            ring.caption = if (r.duplicates > 0) "${r.duplicates} duplicates skipped" else fmt(r.bytesDone)
+            val el = (System.currentTimeMillis() - r.startedAt).coerceAtLeast(1)
+            val speed = if (r.startedAt > 0) r.bytesDone * 1000 / el else 0
+            val left = if (speed > 0 && r.active && !waiting) (r.bytesTotal - r.bytesDone) / speed else -1
+            setStat("files", "%,d".format(r.done))
+            (stats.findViewWithTag<android.widget.TextView>("files")?.parent as? LinearLayout)?.getChildAt(1)
+                ?.let { (it as android.widget.TextView).text = "of %,d files".format(r.total) }
+            setStat("speed", if (r.active) "${fmt(speed)}/s" else "–")
+            setStat("time left", when { left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
+            freeBtn.visibility = if (waiting) View.VISIBLE else View.GONE
+            stopBtn.visibility = if (r.active) View.VISIBLE else View.GONE
         }
-        stTitle.text = r.title
-        freeBtn.visibility = if (Hub.wave.phase == app.pixelferry.core.WaveCoordinator.Phase.WAITING) android.view.View.VISIBLE else android.view.View.GONE
-        stDetail.text = r.detail + if (r.errors.isNotEmpty()) "\n\nProblems: ${r.errors.takeLast(3).joinToString("\n")}" else ""
-        bar.max = r.total.coerceAtLeast(1); bar.progress = r.done
-        val el = (System.currentTimeMillis() - r.startedAt).coerceAtLeast(1)
-        val speed = if (r.startedAt > 0) r.bytesDone * 1000 / el else 0
-        stCounts.text = if (r.total > 0) "${r.done} of ${r.total} · ${fmt(r.bytesDone)} of ${fmt(r.bytesTotal)} · ${fmt(speed)}/s\n" +
-            "duplicates ${r.duplicates} · already done ${r.skipped} · failed ${r.failed} · wave ${Hub.wave.waveNumber}"
-        else "Free on Pixel: ${fmt(Hub.storage.freeBytes())}"
-        if (!r.active && stTitle.tag != "idle") { stTitle.tag = "idle"; renderDelete() }
-        if (r.active) stTitle.tag = null
         // keep the screen on during a run so the free-up helper can tap Google Photos
-        if (r.active) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (r.active) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (!r.active && runCard.tag != "idle") { runCard.tag = "idle"; renderDelete() }
+        if (r.active) runCard.tag = null
         ui.postDelayed({ tick() }, 1000)
     }
 
-    // ---------- setup checklist ----------
-    private fun renderSetup() {
-        setup.removeAllViews()
-        setup.add(h("Setup checklist"))
-        val storageOk = checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        val notifOk = PhotosWatcher.isEnabled(this)
-        val a11yOk = FreeUpService.isEnabled(this)
-        val batteryOk = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
-        fun row(ok: Boolean, text: String, fix: () -> Unit) {
-            setup.add(p((if (ok) "✅ " else "⬜ ") + text))
-            if (!ok) setup.add(btn("Fix: $text") { fix() })
-        }
-        row(storageOk, "Save photos to the Pixel") {
-            requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE), 1)
-        }
-        row(notifOk, "See when Google Photos is backing up") {
-            startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-            toast("Turn ON 'PixelFerry backup watcher'")
-        }
-        row(a11yOk, "Auto-tap 'Free up space' (optional)") {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            toast("Open 'PixelFerry free-up helper' and turn it ON")
-        }
-        row(batteryOk, "Keep running with the screen off") {
-            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-        }
-        val prefs = getSharedPreferences("pf", 0)
-        row(prefs.getBoolean("qualityOriginal", false), "Google Photos backup quality is 'Original'") {
-            AlertDialog.Builder(this).setTitle("Check Google Photos quality")
-                .setMessage("Open Google Photos > profile picture > Photos settings > Backup > Backup quality.\n\n" +
-                    "It must say 'Original quality'. With 'Storage saver', Google keeps a compressed copy, and deleting the " +
-                    "originals from your phones would lose quality.\n\nIs it set to Original quality?")
-                .setNegativeButton("Not yet") { _, _ -> packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) } }
-                .setPositiveButton("Yes, Original") { _, _ -> prefs.edit().putBoolean("qualityOriginal", true).apply(); renderSetup() }
-                .show()
-        }
-        setup.add(p("Also in Google Photos: Backup ON, and after the first transfer from a new device, " +
-            "Backup > Back up device folders > turn ON the new PixelFerry folder.", 13f, 0xFF5F6368.toInt()))
+    private fun setStat(label: String, value: String) { (stats.findViewWithTag<android.widget.TextView>(label))?.text = value }
+
+    private fun confirmStop() {
+        AlertDialog.Builder(this).setTitle("Stop the transfer?")
+            .setMessage("Everything copied so far is kept. Tap Start again later and it continues where it left off.")
+            .setNegativeButton("Keep going", null)
+            .setPositiveButton("Stop") { _, _ -> TransferService.send(this, TransferService.ACTION_STOP) }.show()
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        renderSetup()
+    /** You chose to run Free up space. */
+    private fun freeUpNow() {
+        if (FreeUpService.instance != null) FreeUpService.watchManual = true // window opens when Google's confirm is pressed
+        else thread { Hub.tracker.openFreeUpWindow(); Hub.watchWindow() }
+        packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) }
+            ?: toast("Google Photos is not installed")
+        toast("In Google Photos: profile picture › Free up space › confirm")
     }
 
-    // ---------- sources ----------
+    // ---------------- sources ----------------
     private fun renderSources() {
-        sources.removeAllViews()
-        sources.add(h("Send from a device"))
-        val list = usb.deviceList.values
-        if (list.isEmpty()) {
-            sources.add(p("Plug a phone, tablet or camera into the Pixel with a cable.\n" +
-                "• iPhone: unlock it, tap Trust / Allow.\n• Oppo / OnePlus: pick 'File transfer' in its USB notification.\n" +
-                "• If nothing shows: on the Pixel's USB notification choose 'USB controlled by: This device'."))
+        sourcesBox.removeAllViews()
+        sourcesBox.addView(section("Send photos from"))
+        for (d in usb.deviceList.values) {
+            val name = listOfNotNull(d.manufacturerName, d.productName).joinToString(" ").ifBlank { "USB device" }
+            val apple = d.vendorId == 1452
+            sourcesBox.addView(tile(if (apple) "📱" else "📲", C.TINT_GREEN, name, "Plugged in · tap to choose photos", highlight = true) { requestUsb(d) })
         }
-        for (d in list) {
-            val name = listOfNotNull(d.manufacturerName, d.productName).joinToString(" ").ifBlank { "USB device ${d.vendorId}" }
-            sources.add(btn("Open $name", primary = true) { requestUsb(d) })
+        if (usb.deviceList.isEmpty()) {
+            sourcesBox.addView(tile("🔌", C.TINT_BLUE, "A phone, tablet or camera", "Plug it into the Pixel with a cable") { cableHelp() })
         }
-        sources.add(btn("Choose a folder / SD card / USB drive") {
-            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_TREE)
+        sourcesBox.addView(tile("💻", C.TINT_VIOLET, "A computer", "Windows or Linux, over Wi-Fi") {
+            if (TransferService.receiver == null) TransferService.send(this, TransferService.ACTION_RECV_ON)
+            ui.postDelayed({ renderComputer() }, 1500)
         })
+        sourcesBox.addView(tile("🗂️", C.TINT_AMBER, "A folder, SD card or USB drive", "Pick it with Android's file picker") {
+            @Suppress("DEPRECATION") startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_TREE)
+        })
+    }
+
+    private fun cableHelp() {
+        AlertDialog.Builder(this).setTitle("Plug in by cable")
+            .setMessage("📱 iPhone / iPad\nUnlock it and tap Trust or Allow.\nFor full quality once: iPhone Settings › Photos › Transfer to Mac or PC › Keep Originals.\n\n" +
+                "📲 Oppo, OnePlus, other Android\nOn that device, tap the USB notification and choose File transfer.\n\n" +
+                "📷 Insta360 or camera\nSet USB mode to MTP/PTP. In \"storage\" mode, use the folder option instead.\n\n" +
+                "Nothing appears? On this Pixel tap the USB notification › \"USB controlled by: This device\".")
+            .setPositiveButton("Got it", null).show()
     }
 
     private fun requestUsb(d: UsbDevice) {
@@ -218,8 +240,8 @@ class MainActivity : Activity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) { src?.let { Hub.source = it }; return@runOnUiThread }
                 if (src == null) {
-                    AlertDialog.Builder(this).setTitle("Can't read this device yet")
-                        .setMessage("• iPhone: unlock it and tap 'Trust' or 'Allow'.\n• Android phone/tablet: swipe down on it, tap the USB notification, choose 'File transfer'.\n• Camera: set its USB mode to MTP/PTP or storage. In storage mode use 'Choose a folder'.\nThen tap Open again.")
+                    AlertDialog.Builder(this).setTitle("Almost there")
+                        .setMessage("The device needs to allow access first:\n\n📱 iPhone: unlock it and tap Trust / Allow.\n📲 Android: tap its USB notification › File transfer.\n📷 Camera: set USB mode to MTP/PTP.\n\nThen tap the device again.")
                         .setPositiveButton("OK", null).show()
                 } else {
                     Hub.source = src
@@ -231,20 +253,45 @@ class MainActivity : Activity() {
 
     @Deprecated("Activity API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
+        @Suppress("DEPRECATION") super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQ_TREE || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
-        contentResolver.takePersistableUriPermission(uri,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         val label = Uri.decode(uri.lastPathSegment ?: "Folder").substringAfterLast(':').substringAfterLast('/').ifBlank { "Folder" }
         Hub.source = SafSource(contentResolver, uri, label)
         startActivity(Intent(this, PickActivity::class.java))
     }
 
-    // ---------- delete from source ----------
+    // ---------------- computer ----------------
+    private fun renderComputer() {
+        computerBox.removeAllViews()
+        val code = TransferService.pairingCode
+        if (TransferService.receiver == null || code == null) return
+        val ip = wifiIp()
+        val c = card(C.TINT_VIOLET)
+        c.add(chip("●  Ready for your computer", C.PRIMARY2, C.CARD), h("Send from your computer"),
+            p("On your Windows or Linux computer (same Wi-Fi), run:"))
+        c.addView(text("python pixelferry_send.py send \"FOLDER\" --to $ip --code $code --owner YOURNAME --device Laptop", 14f, C.INK).apply {
+            typeface = Typeface.MONOSPACE; setTextIsSelectable(true)
+            background = rounded(C.CARD, dpf(12f)); setPadding(dp(12), dp(10), dp(12), dp(10))
+        })
+        c.add(text("Address", 13f, C.INK2).apply { setPadding(0, dp(12), 0, 0) }, text(ip, 22f, C.INK, bold = true),
+            text("Pairing code", 13f, C.INK2).apply { setPadding(0, dp(8), 0, 0) },
+            text(code, 22f, C.PRIMARY2, bold = true).apply { typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD); setTextIsSelectable(true) },
+            p("🔒 Encrypted and locked to this Pixel. A new code is made each time.", 14f),
+            link("Stop receiving", C.DANGER) { TransferService.send(this, TransferService.ACTION_RECV_OFF); ui.postDelayed({ renderComputer() }, 500) })
+        computerBox.addView(c)
+    }
+
+    private fun wifiIp(): String {
+        @Suppress("DEPRECATION") val ip = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager).connectionInfo.ipAddress
+        return if (ip == 0) "Connect the Pixel to Wi-Fi" else "${ip and 255}.${ip shr 8 and 255}.${ip shr 16 and 255}.${ip shr 24 and 255}"
+    }
+
+    // ---------------- delete from source ----------------
     private fun renderDelete() {
         val src = Hub.source
-        if (src == null) { delete.removeAllViews(); delete.visibility = android.view.View.GONE; return }
+        if (src == null) { deleteBox.removeAllViews(); return }
         thread { // database work off the main thread (10k rows)
             val prof = Hub.ledger.device(src.deviceKey)
             val label = prof?.let { "${it.owner}'s ${it.label}" } ?: src.suggestedLabel
@@ -254,74 +301,59 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showDelete(label: String, items: List<app.pixelferry.core.Item>, waiting: Int) {
-        delete.removeAllViews()
-        delete.visibility = android.view.View.VISIBLE
-        delete.add(h("Delete from $label"))
-        delete.add(p("${items.size} files (${fmt(items.sumOf { it.size })}) are confirmed backed up by Google Photos and can be removed from $label." +
-            if (waiting > 0) "\n$waiting more are on the Pixel waiting for Google backup (kept on $label for now)." else ""))
+    private fun showDelete(label: String, items: List<Item>, waiting: Int) {
+        deleteBox.removeAllViews()
+        if (items.isEmpty() && waiting == 0) return
+        val c = card(C.TINT_GREEN)
+        if (items.isNotEmpty()) {
+            c.add(chip("✓  Safe in Google Photos", C.SUCCESS, C.CARD),
+                h("%,d photos & videos backed up".format(items.size)),
+                p("They were copied byte for byte and Google Photos has them. You can free ${fmt(items.sumOf { it.size })} on $label."))
+        } else {
+            c.add(chip("☁  Waiting for Google", C.WARN, C.CARD), h("Almost done"))
+        }
+        if (waiting > 0) c.addView(p("%,d more are on the Pixel waiting for Google backup. They stay on $label until then.".format(waiting), 15f))
         if (Hub.source?.canDelete == false) {
-            delete.add(p("This device doesn't report a serial number, so PixelFerry won't delete from it (it can't be sure it's the same device). Delete these from the device itself."))
-        } else if (items.isNotEmpty()) delete.add(btn("Delete ${items.size} transferred files from $label") { confirmDelete(label, items.size, items.sumOf { it.size }) })
-        if (waiting > 0 && !Hub.run.active) delete.add(btn("Finish: get the last $waiting confirmed by Google now") {
+            c.addView(p("This device has no serial number, so PixelFerry won't delete from it. Delete them on the device itself.", 15f, C.WARN))
+        } else if (items.isNotEmpty()) {
+            c.addView(btn("Delete them from $label", primary = true, color = C.SUCCESS) { confirmDelete(label, items.size, items.sumOf { it.size }) })
+        }
+        if (waiting > 0 && !Hub.run.active) c.addView(link("Finish now: get the last %,d confirmed".format(waiting)) {
             TransferService.send(this, TransferService.ACTION_FINISH)
         })
+        deleteBox.addView(c)
     }
 
     /** Two separate confirmations, always. */
     private fun confirmDelete(label: String, n: Int, bytes: Long) {
         AlertDialog.Builder(this)
-            .setTitle("Delete $n files from $label?")
-            .setMessage("These $n files (${fmt(bytes)}) were copied to the Pixel, checked byte for byte, and Google Photos " +
-                "has backed them up (it already removed them from the Pixel with Free up space).\n\nFiles not yet backed up are NOT included.")
+            .setTitle("Delete %,d files from $label?".format(n))
+            .setMessage("These files (${fmt(bytes)}) were copied to the Pixel, checked byte for byte, and Google Photos has backed them up.\n\nFiles not backed up yet are NOT included.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Continue") { _, _ ->
                 AlertDialog.Builder(this)
                     .setTitle("Last check")
-                    .setMessage("Permanently delete $n files from $label? This cannot be undone on $label.\n\n" +
-                        "(If iCloud Photos is on, iPhone deletions also go to iCloud's 'Recently Deleted' for 30 days.)")
+                    .setMessage("Permanently delete %,d files from $label? This can't be undone on $label.\n\n(With iCloud Photos on, iPhone deletions also go to iCloud's Recently Deleted for 30 days.)".format(n))
                     .setNegativeButton("No, keep them", null)
-                    .setPositiveButton("Yes, delete $n") { _, _ ->
+                    .setPositiveButton("Yes, delete") { _, _ ->
                         TransferService.pendingDelete = Hub.source
                         TransferService.send(this, TransferService.ACTION_DELETE)
                     }.show()
             }.show()
     }
 
-    // ---------- computer ----------
-    private fun renderComputer() {
-        computer.removeAllViews()
-        computer.add(h("Receive from a computer (Wi-Fi)"))
-        val on = TransferService.receiver != null
-        val sw = Switch(this).apply { text = "Receive from Windows / Linux computer"; isChecked = on; textSize = 16f }
-        sw.setOnCheckedChangeListener { _, c ->
-            TransferService.send(this, if (c) TransferService.ACTION_RECV_ON else TransferService.ACTION_RECV_OFF)
-            ui.postDelayed({ renderComputer() }, 700)
-        }
-        computer.add(sw)
-        val code = TransferService.pairingCode
-        if (on && code != null) {
-            val ip = wifiIp()
-            computer.add(p("Address: $ip\nPairing code: $code", 20f, 0xFF1A73E8.toInt()))
-            computer.add(p("On the computer, run:\npython pixelferry_send.py send \"FOLDER\" --to $ip --code $code --owner YOURNAME --device Laptop", 13f))
-            computer.add(p("Same Wi-Fi only. The connection is encrypted and locked to this Pixel; the code changes each time you switch this on.", 13f, 0xFF5F6368.toInt()))
-        }
-    }
-
-    private fun wifiIp(): String {
-        @Suppress("DEPRECATION") val ip = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager).connectionInfo.ipAddress
-        return if (ip == 0) "(connect the Pixel to Wi-Fi)" else "${ip and 255}.${ip shr 8 and 255}.${ip shr 16 and 255}.${ip shr 24 and 255}"
-    }
-
-    private fun helpCard(): LinearLayout = card().add(
-        h("Tips"),
-        p("• iPhone full quality: iPhone Settings > Photos > Transfer to Mac or PC > 'Keep Originals' (HEIC stays HEIC, no conversion).\n" +
-            "• Leaving iCloud: turn on 'Download and Keep Originals', let it download what fits, transfer, delete, repeat until iCloud is empty.\n" +
-            "• Big runs: keep this app open on screen and the Pixel near Wi-Fi. The screen may stay on so the free-up helper can work; you can turn it off, then you get one tap per wave instead.\n" +
-            "• The other phone draws power from the Pixel over the cable. PixelFerry pauses at 12% battery and continues at 25%.\n" +
-            "• In Google Photos, search a tag like 'Mom_iPhone13' to see everything from that phone.\n" +
-            "• Insta360 raw files arrive as NAME_insv.mp4 / NAME_insp.jpg. The bytes are untouched; rename back to .insv/.insp to edit in Insta360 Studio.", 14f)
-    )
+    // ---------------- help ----------------
+    private fun helpTile(): View = vbox(0).add(section("Help"),
+        tile("💡", C.TINT_BLUE, "Tips & questions", "iCloud, battery, Insta360, finding photos") {
+            AlertDialog.Builder(this).setTitle("Tips")
+                .setMessage("☁ Leaving iCloud\nTurn on \"Download and Keep Originals\" on the iPhone, transfer, delete, repeat until iCloud is empty.\n\n" +
+                    "🔎 Finding photos\nIn Google Photos, search a tag like Mom_iPhone13 to see everything from that phone.\n\n" +
+                    "🔋 Battery\nThe other phone draws power from the Pixel. PixelFerry pauses at 12% and continues at 25%.\n\n" +
+                    "🎥 Insta360\nRaw files arrive as NAME_insv.mp4 / NAME_insp.jpg, bytes untouched. Rename back to edit in Insta360 Studio.\n\n" +
+                    "🛟 Safety\nNothing is deleted anywhere until Google Photos has it, and you confirm twice.")
+                .setPositiveButton("OK", null).show()
+        },
+        tile("⚙️", C.TINT_AMBER, "Setup", "Permissions and Google Photos settings") { startActivity(Intent(this, SetupActivity::class.java)) })
 
     companion object {
         const val ACTION_USB_PERMISSION = "app.pixelferry.USB_PERMISSION"
