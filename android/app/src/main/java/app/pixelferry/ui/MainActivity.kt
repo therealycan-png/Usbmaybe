@@ -68,7 +68,7 @@ class MainActivity : Activity() {
         heroBox = LinearLayout(this); setupBox = vbox(0); runBox = vbox(0); deleteBox = vbox(0); computerBox = vbox(0); sourcesBox = vbox(0)
         root = vbox(0).apply {
             setBackgroundColor(C.BG); setPadding(0, 0, 0, dp(24))
-            add(heroBox, setupBox, runBox, deleteBox, computerBox, sourcesBox, helpTile())
+            add(heroBox, setupBox, runBox, deleteBox, computerBox, sourcesBox, findBox, helpTile())
         }
         setContentView(ScrollView(this).apply { isFillViewport = true; setBackgroundColor(C.BG); addView(root) })
         registerReceiver(permReceiver, IntentFilter(ACTION_USB_PERMISSION))
@@ -88,7 +88,7 @@ class MainActivity : Activity() {
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
-    private fun renderAll() { renderHero(); renderSetup(); renderSources(); renderComputer(); renderDelete() }
+    private fun renderAll() { renderHero(); renderSetup(); renderSources(); renderComputer(); renderDelete(); renderFind() }
 
     private fun handleIntent(i: Intent?) {
         when (i?.action) {
@@ -128,7 +128,7 @@ class MainActivity : Activity() {
     private val runDetail by lazy { p() }
     private val stats by lazy { statRow("" to "files", "" to "speed", "" to "time left") }
     private var filesLabel: android.widget.TextView? = null
-    private val freeBtn by lazy { btn("Free up space now", primary = true) { freeUpNow() } }
+    private val freeBtn by lazy { btn("Make room now", primary = true) { freeUpNow() } }
     private val stopBtn by lazy { link("Stop", C.DANGER) { confirmStop() } }
     private val detailsLink by lazy { link("Show details", C.INK2) {
         AlertDialog.Builder(this).setTitle("Details").setMessage(Hub.run.errors.takeLast(20).joinToString("\n\n")).setPositiveButton("OK", null).show()
@@ -156,7 +156,7 @@ class MainActivity : Activity() {
 
     /** Stays on screen while waiting (a toast would vanish). */
     private val freeHelp by lazy {
-        text("You can do it yourself:\n1. Tap Free up space now\n2. In Google Photos tap Free up space\n3. Tap the blue Free up button\nPixelFerry continues by itself.", 15f, C.INK).apply {
+        text("Make room yourself:\n1. Tap Make room now (opens Google Photos)\n2. In Google Photos tap Free up space\n3. Tap the blue Free up button\nGoogle only clears copies it has backed up. PixelFerry continues by itself.", 15f, C.INK).apply {
             background = rounded(C.TINT_AMBER, dpf(14f)); setPadding(dp(14), dp(12), dp(14), dp(12))
         }
     }
@@ -210,7 +210,7 @@ class MainActivity : Activity() {
             ring.indeterminate = r.active && r.total == 0
             ring.fraction = frac
             ring.center = "${(frac * 100).toInt()}%"
-            ring.caption = if (r.active) fmt(r.bytesDone) else ""
+            ring.caption = if (r.active) "${fmt(r.bytesDone)} of ${fmt(r.bytesTotal)}" else ""
             val el = (System.currentTimeMillis() - r.startedAt).coerceAtLeast(1)
             val speed = if (r.startedAt > 0) r.bytesDone * 1000 / el else 0
             val left = if (speed > 0 && r.active && !waiting) (r.bytesTotal - r.bytesDone) / speed else -1
@@ -223,7 +223,10 @@ class MainActivity : Activity() {
             val took = (System.currentTimeMillis() - r.startedAt) / 1000
             (stats.findViewWithTag<android.widget.TextView>("time left")?.parent as? LinearLayout)?.getChildAt(1)
                 ?.let { (it as android.widget.TextView).text = if (r.active) "time left" else "took" }
-            setStat("time left", when { !r.active && r.startedAt > 0 -> dur(took); waiting -> "~20 min"; left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
+            (stats.findViewWithTag<android.widget.TextView>("time left")?.parent as? LinearLayout)?.getChildAt(1)
+                ?.let { if (waiting) (it as android.widget.TextView).text = "Google backup" }
+            setStat("time left", when { !r.active && r.startedAt > 0 -> dur(took)
+                waiting -> "waiting " + dur(((System.currentTimeMillis() - r.waitStartedAt) / 1000).coerceAtLeast(0)); left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
             freeBtn.visibility = if (waiting) View.VISIBLE else View.GONE
             stopBtn.visibility = if (r.active) View.VISIBLE else View.GONE
         }
@@ -336,7 +339,7 @@ class MainActivity : Activity() {
         c.add(chip("●  Ready for your computer", C.PRIMARY2, C.CARD), h("Send from your computer"),
             p("First time: get the sender onto your computer. It already contains this Pixel's code, so there's nothing to type."),
             btn("Send to my computer", primary = true, color = C.PRIMARY2) { app.pixelferry.ShareProvider.shareSender(this, code) },
-            text("Use Nearby Share, Google Drive or a USB cable. Some email apps block it. Only send it to your own computer.", 13.5f, C.INK2).apply { setPadding(0, dp(6), 0, dp(10)) },
+            text("Use Nearby Share, Google Drive or a USB cable. Some email apps block it. Only send it to your own computer.\nIf Windows says \"Windows protected your PC\": click More info › Run anyway.", 13.5f, C.INK2).apply { setPadding(0, dp(6), 0, dp(10)) },
             p("Then on the computer: extract it and double-click  PixelFerry Send, then choose the photo folder. It finds this Pixel by itself."),
             text("Or type the code by hand if it asks:", 14f, C.INK2).apply { setPadding(0, dp(10), 0, 0) })
         c.add(text("Pairing code", 13f, C.INK2).apply { setPadding(0, dp(8), 0, 0) },
@@ -368,8 +371,8 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (isDestroyed) return@runOnUiThread
                     deleteBox.removeAllViews()
-                    for ((label, n) in list) deleteBox.addView(tile("🧹", C.TINT_GREEN, "Free up space on $label",
-                        "%,d photos are safe in Google Photos. Plug it in to delete them.".format(n)) { cableHelp() })
+                    for ((label, n) in list) deleteBox.addView(tile("🧹", C.TINT_GREEN, "Delete originals from $label",
+                        "%,d are safe in Google Photos. Plug it in to delete them there.".format(n)) { cableHelp() })
                 }
             }
             return
@@ -398,7 +401,7 @@ class MainActivity : Activity() {
         if (Hub.source?.canDelete == false) {
             c.addView(p("This device has no serial number, so PixelFerry won't delete from it. Delete them on the device itself.", 15f, C.WARN))
         } else if (items.isNotEmpty()) {
-            c.addView(btn("Delete them from $label", primary = true, color = C.DANGER) { confirmDelete(label, items.size, items.sumOf { it.size }) })
+            c.addView(btn("Delete originals from $label", primary = true, color = C.DANGER) { confirmDelete(label, items.size, items.sumOf { it.size }) })
         }
         if (waiting > 0 && !Hub.run.active) c.addView(link("Finish now: get the last %,d confirmed".format(waiting)) {
             TransferService.send(this, TransferService.ACTION_FINISH)
@@ -408,9 +411,15 @@ class MainActivity : Activity() {
 
     /** Two separate confirmations, always. */
     private fun confirmDelete(label: String, n: Int, bytes: Long) {
-        AlertDialog.Builder(this)
-            .setTitle("Delete %,d files from $label?".format(n))
-            .setMessage("These files (${fmt(bytes)}) were copied to the Pixel, checked byte for byte, and Google Photos has backed them up.\n\nFiles not backed up yet are NOT included.\n\nOne last thing: Google Photos must be on Original quality (you checked this in setup).")
+        val tick = android.widget.CheckBox(this).apply {
+            text = "I checked: Google Photos backup quality says Original quality"; textSize = 15f; setTextColor(C.INK)
+            buttonTintList = android.content.res.ColorStateList.valueOf(C.PRIMARY); minHeight = dp(48)
+        }
+        val box = vbox(20).add(p("These files (${fmt(bytes)}) were copied to the Pixel, checked byte for byte, and Google Photos has backed them up. Files not backed up yet are NOT included.\n\nGoogle must keep them in Original quality, or the only copies left would be smaller ones.", 15f), tick)
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("Delete %,d originals from $label?".format(n))
+            .setView(box)
+            .setNeutralButton("Check in Google Photos") { _, _ -> packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) } }
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Continue") { _, _ ->
                 AlertDialog.Builder(this)
@@ -421,10 +430,34 @@ class MainActivity : Activity() {
                         TransferService.pendingDelete = Hub.source
                         TransferService.send(this, TransferService.ACTION_DELETE)
                     }.show()
-            }.show()
+            }.create()
+        dlg.setOnShowListener {
+            val ok = dlg.getButton(AlertDialog.BUTTON_POSITIVE); ok.isEnabled = false
+            tick.setOnCheckedChangeListener { _, c -> ok.isEnabled = c }
+        }
+        dlg.show()
     }
 
     // ---------------- help ----------------
+    private val findBox by lazy { vbox(0) }
+
+    /** One tile per person/device already sent, opening a Google Photos search for its tag. */
+    private fun renderFind() {
+        thread {
+            val rows = Hub.ledger.devices().mapNotNull { d ->
+                val n = Hub.ledger.forDevice(d.deviceKey).count { it.state != ItemState.MISSING_UNKNOWN }
+                if (n > 0) Triple("${d.owner}'s ${d.label}", app.pixelferry.core.Naming.tag(d.owner, d.label), n) else null
+            }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                findBox.removeAllViews()
+                if (rows.isEmpty()) return@runOnUiThread
+                findBox.addView(section("Find photos"))
+                for ((label, tag, n) in rows) findBox.addView(tile("🔎", C.TINT_BLUE, label, "%,d sent · search \"$tag\" in Google Photos".format(n)) { seeInPhotos(tag) })
+            }
+        }
+    }
+
     private fun helpTile(): View = vbox(0).add(section("Help"),
         tile("💡", C.TINT_BLUE, "Tips & questions", "iCloud, battery, Insta360, finding photos") {
             AlertDialog.Builder(this).setTitle("Tips")

@@ -35,6 +35,7 @@ WRAPPED = {"insv", "insp"}
 ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".pixelferry")
 CHUNK = 1 << 20
+GUIDED = False  # double-click mode: talk about double-clicking, not commands
 POLL_SECONDS = float(os.environ.get("PIXELFERRY_POLL_SECONDS", "60"))
 
 
@@ -428,13 +429,28 @@ def cmd_send(a):
             eta = f" ETA {int(left / rate // 60)} min" if left and rate > 0 else ""
             print(f"\r  {n}/{len(todo)}  {fmt_bytes(sent_bytes)}  {fmt_bytes(rate)}/s{eta}      ", end="", flush=True)
     except KeyboardInterrupt:
-        print("\nStopped. Run the same command again to continue where you left off.")
+        print("\nStopped. " + ("Double-click PixelFerry Send again" if GUIDED else "Run the same command again") + " to continue where you left off.")
     finally:
         cache.save()
         px.close()
     print(f"\nDone. Sent {sent}, duplicates skipped {dup}, failed {failed}.")
+    if GUIDED and sent:
+        print("Google Photos backs them up over the next while. Double-click PixelFerry Send again later to delete them from this computer.")
     if failed:
-        print("Run the same command again to retry the failed ones.")
+        print(("Double-click PixelFerry Send again" if GUIDED else "Run the same command again") + " to retry the failed ones.")
+
+
+def count_deletable(folder, extra):
+    """How many files in this folder the Pixel says are safely backed up (nothing is deleted here)."""
+    ns = argparse.Namespace(to=None, port=int(os.environ.get("PIXELFERRY_PORT", "8443")), code=None)
+    if "--to" in extra:
+        ns.to = extra[extra.index("--to") + 1]
+    px = connect(ns)
+    files, _ = collect([folder])
+    keys = {item_key(p, st) for p, st in files}
+    s, d = with_retries(lambda: px.request("POST", "/api/deletable"), "deletable")
+    px.close()
+    return sum(1 for line in d.splitlines() if "\t" in line and unquote(line.split("\t")[0]) in keys)
 
 
 def cmd_delete(a):
@@ -451,8 +467,7 @@ def cmd_delete(a):
         if k in by_key:
             candidates.append((by_key[k][0], by_key[k][1], sha.strip(), k))
     if not candidates:
-        print("Nothing is ready to delete yet. Files become deletable after Google Photos backs them up "
-              "and the Pixel app's 'Free up space' step has run.")
+        print("Nothing is ready to delete yet. Files become deletable after Google Photos has backed them up.")
         return
     size = sum(st.st_size for _, st, _, _ in candidates)
     print(f"{len(candidates)} files ({fmt_bytes(size)}) in these folders are safely backed up by Google Photos.")
@@ -575,6 +590,17 @@ def guided(folder=None):
     if "--to" in extra:
         st["to"] = extra[extra.index("--to") + 1]
     save_settings(st)
+    global GUIDED
+    GUIDED = True
+    # Anything from this folder Google already has? Offer to delete it first (nothing can be ready right after sending).
+    if mine:
+        try:
+            n = count_deletable(folder, extra)
+            if n and ask(f"{n} photos/videos from this folder are already safe in Google Photos. Delete them from this computer? (yes/no)", "no").lower() == "yes":
+                main(["delete-backed-up", folder] + [x for i, x in enumerate(extra) if x != "--code" and extra[i - 1:i] != ["--code"]])
+        except SystemExit as e:
+            if e.code not in (None, 0):
+                print(e.code)
     args = ["send", folder, "--owner", owner, "--device", device] + extra
     try:
         main(args)
@@ -589,13 +615,7 @@ def guided(folder=None):
                 except SystemExit as e2:
                     if e2.code not in (None, 0):
                         print(e2.code)
-    print()
-    if ask("Delete the photos Google Photos has already backed up from this folder? (yes/no)", "no").lower() == "yes":
-        try:
-            main(["delete-backed-up", folder] + [x for i, x in enumerate(extra) if extra[i - 1:i] != ["--code"] and x != "--code"])
-        except SystemExit as e:
-            if e.code not in (None, 0):
-                print(e.code)
+
 
 
 def main(argv=None):

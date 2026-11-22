@@ -58,7 +58,9 @@ class ShareProvider : ContentProvider() {
                 z.write(("1. Extract this zip (right-click > Extract All).\r\n" +
                     "2. Windows: double-click \"PixelFerry Send\". Linux: run ./pixelferry-send.sh\r\n" +
                     "3. Choose your photo folder. It finds the Pixel by itself (same Wi-Fi) - no code to type.\r\n" +
-                    "Python is fetched automatically on Windows the first time if it isn't installed.\r\n").toByteArray())
+                    "Python is fetched automatically on Windows the first time if it isn't installed.\r\n" +
+                    "If Windows says \"Windows protected your PC\": click More info, then Run anyway (it's the PixelFerry sender you just sent yourself).\r\n" +
+                    "Later, double-click it again: it offers to delete the photos Google Photos has already backed up.\r\n").toByteArray())
                 z.closeEntry()
             }
             val uri = Uri.parse("content://app.pixelferry.share/${zip.name}")

@@ -47,6 +47,7 @@ object Notifs : WaveNotifier {
     private fun cleanAlert() = nm(App.instance).cancel(ID_ALERT)
 
     override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {
+        if (Hub.run.phase != Phase.WAITING_GOOGLE) Hub.run.waitStartedAt = System.currentTimeMillis()
         Hub.run.phase = Phase.WAITING_GOOGLE
         Hub.run.title = "Pixel is full: waiting for Google"
         Hub.run.detail = "Google Photos is backing up this batch (usually 10–30 min), then copying continues by itself."

@@ -64,6 +64,8 @@ class RunState {
     @Volatile var deviceLabel = ""
     /** File-name tag of the last run, e.g. "Mom_iPhone13" (to find them in Google Photos). */
     @Volatile var tag = ""
+    /** When the current wait for Google began (0 = not waiting). */
+    @Volatile var waitStartedAt = 0L
     @Volatile var active = false
     @Volatile var title = "Idle"
     @Volatile var detail = ""
