@@ -197,16 +197,16 @@ class TransferService : Service() {
             val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
             val level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) * 100 / b.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
             val charging = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
-            if (level > 12 || charging) return
+            if (level > 15 || charging) return
             Hub.run.phase = Phase.LOW_BATTERY
             Hub.run.title = "Paused: Pixel battery low ($level%)"
-            Hub.run.detail = "Charge the Pixel. It continues by itself at 25%."
+            Hub.run.detail = "Charge the Pixel (see the battery tips on screen). It continues by itself once it's charging or back at 30%."
             updateNotif(force = true)
             while (!cancel) {
                 Thread.sleep(60_000)
                 val b2 = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
                 val l2 = b2.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) * 100 / b2.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
-                if (l2 >= 25 || b2.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0) { Hub.run.phase = Phase.COPYING; return }
+                if (l2 >= 30 || b2.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0) { Hub.run.phase = Phase.COPYING; return }
             }
         }
     }

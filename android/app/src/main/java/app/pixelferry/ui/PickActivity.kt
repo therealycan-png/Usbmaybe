@@ -287,10 +287,7 @@ class PickActivity : Activity() {
     }
 
     // ---------- start ----------
-    private fun selFile(): File {
-        val h = MessageDigest.getInstance("SHA-256").digest(src!!.deviceKey.toByteArray()).joinToString("") { "%02x".format(it) }.take(16)
-        return File(filesDir, "selection-$h.txt")
-    }
+    private fun selFile(): File = File(filesDir, selectionName(src!!.deviceKey))
 
     private fun resumeSelection(): Set<String>? = selFile().takeIf { it.exists() }?.readLines()?.toSet()
 
@@ -342,5 +339,8 @@ class PickActivity : Activity() {
     companion object {
         const val GOOGLE_MAX_VIDEO = 10L * 1024 * 1024 * 1024
         const val EXTRA_AUTO_RESUME = "autoResume"
+        /** File remembering what was picked for a device (survives the Pixel or the device dying). */
+        fun selectionName(deviceKey: String): String =
+            "selection-" + MessageDigest.getInstance("SHA-256").digest(deviceKey.toByteArray()).joinToString("") { "%02x".format(it) }.take(16) + ".txt"
     }
 }

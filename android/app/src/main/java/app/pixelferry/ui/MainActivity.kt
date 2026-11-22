@@ -68,7 +68,7 @@ class MainActivity : Activity() {
         heroBox = LinearLayout(this); setupBox = vbox(0); runBox = vbox(0); deleteBox = vbox(0); computerBox = vbox(0); sourcesBox = vbox(0)
         root = vbox(0).apply {
             setBackgroundColor(C.BG); setPadding(0, 0, 0, dp(24))
-            add(heroBox, setupBox, runBox, deleteBox, computerBox, sourcesBox, findBox, helpTile())
+            add(heroBox, setupBox, runBox, resumeBox, deleteBox, computerBox, sourcesBox, findBox, helpTile())
         }
         setContentView(ScrollView(this).apply { isFillViewport = true; setBackgroundColor(C.BG); addView(root) })
         registerReceiver(permReceiver, IntentFilter(ACTION_USB_PERMISSION))
@@ -162,7 +162,7 @@ class MainActivity : Activity() {
     }
     private val runCard by lazy {
         card().add(runChip, runTitle, centered(ring).apply { setPadding(0, dp(12), 0, dp(4)) }, stats,
-            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, resumeBtn, seeBtn, freeBtn, takingLong, freeHelp, folderTip, detailsLink, stopBtn)
+            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, freeBtn, takingLong, freeHelp, folderTip, detailsLink, stopBtn)
     }
     /** Google backs up a new device folder only after one switch in Google Photos: ask right away, not hours later. */
     private val folderTip by lazy {
@@ -232,14 +232,53 @@ class MainActivity : Activity() {
             stopBtn.visibility = if (r.active) View.VISIBLE else View.GONE
         }
         // keep the screen on during a run so the free-up helper can tap Google Photos
-        if (r.active) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Battery saver: during a run the screen is dimmed, and only kept on while the battery can afford it
+        // (keeping it on lets the helper tap Google's "Free up space"; otherwise you get a notification instead).
+        val (level, charging) = battery()
+        val lp = window.attributes
+        val wantDim = if (r.active) 0.05f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        if (lp.screenBrightness != wantDim) { lp.screenBrightness = wantDim; window.attributes = lp }
+        if (r.active && (charging || level >= 30)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        batteryCard.visibility = if (r.active && !charging && Hub.source is MtpSource) View.VISIBLE else View.GONE
+        batteryText.text = "Pixel battery $level% and dropping: the Pixel is powering the other device through the cable."
         if (!r.active && runCard.tag != "idle") { runCard.tag = "idle"; renderDelete() }
         if (r.active) runCard.tag = null
         ui.postDelayed({ tick() }, 1000)
     }
 
     private fun dur(sec: Long) = when { sec < 60 -> "<1 min"; sec < 3600 -> "${sec / 60} min"; else -> "${sec / 3600} h ${sec % 3600 / 60} m" }
+
+    private fun battery(): Pair<Int, Boolean> {
+        val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return 100 to true
+        val level = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, 100) * 100 / b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
+        return level to (b.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0)
+    }
+
+    private val batteryText by lazy { text("", 15f, C.INK) }
+    /** Shown while the Pixel drains because it's feeding the other device. */
+    private val batteryCard by lazy {
+        vbox(0).apply {
+            background = rounded(C.TINT_AMBER, dpf(14f)); setPadding(dp(14), dp(12), dp(14), dp(6))
+            addView(text("🔋 Stop the Pixel powering the other device", 16f, C.INK, bold = true))
+            addView(batteryText)
+            addView(text("Try one of these (the copy keeps going):\n" +
+                "1. On the Pixel: swipe down › tap the USB notification › Power options › turn OFF \"Charge connected device\".\n" +
+                "2. Or on the other phone/tablet: swipe down › tap its USB notification › choose to power or charge the connected device.\n" +
+                "3. Or use a USB-C hub with a charger port (\"PD pass-through\"): Pixel › hub, other device › hub, charger › hub.\n" +
+                "If the Pixel gets to 15%, PixelFerry pauses safely and continues later. Nothing is lost.", 14.5f, C.INK))
+            addView(link("Open USB settings") { openUsbSettings() })
+            visibility = View.GONE
+        }
+    }
+
+    private fun openUsbSettings() {
+        val tries = listOf(
+            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$UsbDetailsActivity"),
+            Intent().setClassName("com.android.settings", "com.android.settings.Settings\$ConnectedDeviceDashboardActivity"),
+            Intent(android.provider.Settings.ACTION_SETTINGS))
+        for (i in tries) { try { startActivity(i); toast("Find USB › Power options"); return } catch (_: Exception) {} }
+    }
 
     private fun setStat(label: String, value: String) { (stats.findViewWithTag<android.widget.TextView>(label))?.text = value }
 
@@ -364,6 +403,24 @@ class MainActivity : Activity() {
         val src = Hub.source?.takeIf { it.isConnected() }
         if (src == null) {
             thread {
+                // a transfer that never finished (device or Pixel died, app restarted): never lose Resume
+                val unfinished = if (Hub.run.active) emptyList() else filesDir.listFiles { f -> f.name.startsWith("selection-") }?.mapNotNull { f ->
+                    val keys = f.readLines().toSet()
+                    val dev = Hub.ledger.devices().firstOrNull { d -> PickActivity.selectionName(d.deviceKey) == f.name } ?: return@mapNotNull null
+                    val done = Hub.ledger.forDevice(dev.deviceKey).filter { Hub.ledger.isDone(it) }.map { it.itemKey }.toSet()
+                    val left = keys.count { it !in done }
+                    if (left > 0) "${dev.owner}'s ${dev.label}" to left else null
+                } ?: emptyList()
+                runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
+                    resumeBox.removeAllViews()
+                    for ((label, left) in unfinished) resumeBox.addView(tile("⏯️", C.TINT_BLUE, "Unfinished: $label",
+                        "%,d left. Plug it in and unlock it to continue. Nothing is copied twice.".format(left), highlight = true) {
+                        getSharedPreferences("pf", 0).edit().putBoolean("autoResume", true).apply(); cableHelp()
+                    })
+                }
+            }
+            thread {
                 // remind which devices have backed-up photos waiting to be deleted
                 val list = (Hub.ledger.devices()).mapNotNull { d ->
                     val n = Hub.ledger.deletableFor(d.deviceKey).size
@@ -441,6 +498,7 @@ class MainActivity : Activity() {
 
     // ---------------- help ----------------
     private val findBox by lazy { vbox(0) }
+    private val resumeBox by lazy { vbox(0) }
 
     /** One tile per person/device already sent, opening a Google Photos search for its tag. */
     private fun renderFind() {
