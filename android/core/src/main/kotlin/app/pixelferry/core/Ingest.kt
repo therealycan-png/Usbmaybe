@@ -48,8 +48,9 @@ class IngestEngine(
     /** Always keep this much free so Android and Google Photos keep working. */
     val reserveBytes: Long = 1_500L * 1024 * 1024,
     private val exists: (String) -> Boolean = { File(it).exists() },
-    /** Told about every stored file: (bytes, time they were written to disk). BackupTracker uses it for free-space accounting. */
+    /** Told about every stored file: (bytes, System.nanoTime() when written to disk). BackupTracker uses it for free-space accounting. */
     var onStored: (Long, Long) -> Unit = { _, _ -> },
+    var onWarning: (String) -> Unit = {},
 ) {
     /** Guards dedupe + ledger + rename (commit stage). */
     private val lock = Any()
@@ -74,7 +75,7 @@ class IngestEngine(
         /** SHA-256 the writer computed from the exact bytes it wrote (streaming), if it could. */
         internal val writerSha: String?,
         /** When the bytes finished landing on disk (a free-up window opened later must not count them). */
-        internal val writtenAt: Long = System.currentTimeMillis(),
+        internal val writtenAt: Long = System.nanoTime(), // monotonic: immune to clock changes
     )
 
     /**
@@ -195,7 +196,9 @@ class IngestEngine(
             val (target, item) = stored!!
             try { storage.syncDir(p.dir) } catch (_: Throwable) {}
             try { onStored(len, p.writtenAt) } catch (_: Throwable) {}
-            try { storage.publish(target, MediaTypes.mimeFor(target.name), p.dateTakenMs) } catch (_: Throwable) {}
+            try { storage.publish(target, MediaTypes.mimeFor(target.name), p.dateTakenMs) } catch (t: Throwable) {
+                onWarning("Couldn't announce ${target.name} to Google Photos (${t.message}); it is saved and verified.")
+            }
             return IngestResult.Stored(item)
         } finally {
             if (tmp.exists()) tmp.delete()

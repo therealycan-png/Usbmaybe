@@ -44,19 +44,27 @@ Move photos and videos from any phone, tablet, camera or computer onto an **orig
 
 ## 3. Send from a Windows or Linux computer (Wi-Fi)
 
-1. Install Python 3 (Windows: Microsoft Store > *Python 3*).
-2. Copy `desktop/pixelferry_send.py` to the computer.
-3. On the Pixel: turn on **Receive from a computer**. It shows an address and a pairing code.
-4. On the computer (same Wi-Fi):
-   ```
-   python pixelferry_send.py send "D:\Photos" --to 192.168.1.20 --code XXXX-XXXX-XXXX-XXXX-XXXX-XXXX --owner Shawn --device Laptop
-   ```
-   Add `--since 2024-01-01 --until 2024-12-31` for a date range. Stop any time with Ctrl+C, and run the same command again to continue.
-5. Later, to delete what Google has backed up from the computer:
-   ```
-   python pixelferry_send.py delete-backed-up "D:\Photos" --to 192.168.1.20 --code XXXX-…
-   ```
-   It asks you to type `DELETE`, then `yes`. It re-checks every file's SHA-256 first and keeps anything that changed.
+1. On the Pixel, tap **A computer**, then **Send to my computer**. Send the zip to your computer with Nearby Share, Google Drive or a USB cable. Some email apps block it. It already contains this Pixel's code.
+2. On the computer, extract the zip (right-click > Extract All).
+3. **Windows:** double-click **PixelFerry Send**. **Linux:** run `./pixelferry-send.sh`.
+4. Choose your photo folder. The sender finds the Pixel on the Wi-Fi by itself, so there's no address or code to type.
+
+That's it. Next time, just double-click again. Stop any time (close the window), and run it again to continue where it left off.
+
+- No Python? On Windows, the sender downloads a private copy from python.org the first time (about 10 MB, no install, no admin). On Linux, Python 3 is usually already there.
+- At the end it asks whether to delete the photos Google has already backed up from that folder. It asks you to type `DELETE`, then `yes`, and re-checks every file's SHA-256 first.
+- "Forget paired computers" on the Pixel makes a new code and disconnects every computer.
+
+<details><summary>Advanced: command line</summary>
+
+```
+python pixelferry_send.py send "D:\Photos" --owner Shawn --device Laptop            # finds the Pixel, uses the saved pairing
+python pixelferry_send.py send "D:\Photos" --code XXXX-XXXX-XXXX-XXXX-XXXX-XXXX ...  # first time, if not using the bundle
+python pixelferry_send.py send "D:\Photos" --to 192.168.1.20 ...                     # if Wi-Fi blocks discovery
+python pixelferry_send.py delete-backed-up "D:\Photos"
+```
+Add `--since 2024-01-01 --until 2024-12-31` for a date range.
+</details>
 
 ## 4. Getting everything out of iCloud (to stop paying for it)
 
@@ -78,12 +86,23 @@ If you have a Windows PC, *iCloud for Windows* can download everything at once, 
 - **Google Photos changes:** the auto-tap helper looks for Google's "Free up space" button. If a Google Photos update moves it, you get a notification to tap it yourself, and nothing unsafe happens.
 - **Don't delete files from `DCIM/PixelFerry` by hand** while a transfer is running. If a copy disappears without Google freeing it, PixelFerry keeps the source file and sends it again next time.
 
-## 6. How it keeps your stuff safe
+## 6. How good is it? (measured, not guessed)
+
+| What | Standard | Result |
+|---|---|---|
+| Transfer speed | IETF RFC 6349 transfer-time ratio (ideal ÷ actual over the same link) | **98.4 %** overall (99 % camera roll); **99.8 %** of a plain copy that checks nothing |
+| Accessibility | Google Accessibility Test Framework (the engine behind Play Console's pre-launch report, WCAG 2.1) on every screen | **52/52 checks pass (100 %)** |
+| Code health | Android Lint | **0 errors** |
+| Safety | 34 automated tests, incl. a 10,000-file run with an unplug, corrupted copies and Pixel-full waves, and an end-to-end computer test over TLS | **all pass** |
+
+Re-run them with `./gradlew :core:test :app:testReleaseUnitTest :app:lintRelease` (reports: `android/core/build/efficiency.txt`, `android/app/build/accessibility.txt`). Not tested yet: a real phone. There's no Android emulator or USB device in the build environment, so the first real run is the final test.
+
+## 7. How it keeps your stuff safe
 
 - **Verification:** every file is written, forced to flash (fsync), then read back and hashed (SHA-256). The size must match exactly. From a computer, the hash must match the computer's own hash. Bad copies are retried, and nothing unverified is ever recorded.
 - **Deletion gate:** a source file is deletable only if its Pixel copy disappeared during a short window that opens at the moment Google's *Free up space* is confirmed, and the copy was on the Pixel when that window opened. Copies that vanish any other way are re-sent, and the source is kept. Every delete is confirmed twice, and USB deletes double-check the file name and size on the device first.
 - **Duplicates:** identical files (same SHA-256) from any device are stored once.
-- **Wi-Fi security:** TLS with the Pixel's key kept in Android Keystore. The computer pins 80 bits of the Pixel's certificate fingerprint and authenticates with a one-time token. Wrong codes lock that address out for 5 minutes. A device pretending to be your Pixel is refused before anything is sent.
+- **Wi-Fi security:** TLS with the Pixel's key kept in Android Keystore. The computer pins 80 bits of the Pixel's certificate fingerprint before sending anything, pairs once with the code, then uses its own 160-bit key. Wrong codes lock that address out for 5 minutes. A device pretending to be your Pixel is refused. Discovery replies carry no secrets.
 - **Permissions:** the notification watcher reads only Google Photos' notifications. The accessibility helper acts only inside Google Photos and only while a wave is waiting. PixelFerry has no internet servers and no accounts.
 
 ---

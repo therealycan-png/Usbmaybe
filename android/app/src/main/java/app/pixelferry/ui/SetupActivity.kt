@@ -135,8 +135,8 @@ class SetupActivity : Activity() {
                 done = { it.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(it.packageName) },
                 go = { it.open(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${it.packageName}")), null) }),
             Step("☁️", C.TINT_BLUE, "Google Photos on Original quality",
-                "In Google Photos: profile picture > Photos settings > Backup > Backup quality must say \"Original quality\". Otherwise Google keeps a smaller copy.",
-                "It says Original quality",
+                "In Google Photos: profile picture › Photos settings › Backup › Backup quality must say \"Original quality\".\n\nIf it says Storage saver, Google keeps a smaller copy, and deleting the originals later would lose quality.",
+                "I checked: it says Original quality",
                 done = { it.getSharedPreferences("pf", 0).getBoolean("qualityOriginal", false) },
                 go = { it.getSharedPreferences("pf", 0).edit().putBoolean("qualityOriginal", true).apply(); it.render() }),
         )

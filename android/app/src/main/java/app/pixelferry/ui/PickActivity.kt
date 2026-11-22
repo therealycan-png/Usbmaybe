@@ -106,6 +106,13 @@ class PickActivity : Activity() {
 
         resumeSelection()?.let { keys ->
             val n = entries.count { it.itemKey in keys && it.itemKey !in done }
+            val prefs2 = getSharedPreferences("pf", 0)
+            val auto = intent.getBooleanExtra(EXTRA_AUTO_RESUME, false) || prefs2.getBoolean("autoResume", false)
+            prefs2.edit().remove("autoResume").apply()
+            if (n > 0 && auto && Hub.ledger.device(s.deviceKey) != null) {
+                // came from "Resume": carry on straight away with the same names as before
+                body.post { start(entries.filter { it.itemKey in keys }) }
+            }
             if (n > 0) body.add(card(C.TINT_BLUE).add(h("Pick up where you left off"),
                 p("%,d files from last time are still to go.".format(n)),
                 btn("Resume · %,d left".format(n), primary = true) { start(entries.filter { it.itemKey in keys }) }))
@@ -332,5 +339,8 @@ class PickActivity : Activity() {
 
     override fun onDestroy() { loader.shutdownNow(); super.onDestroy() }
 
-    companion object { const val GOOGLE_MAX_VIDEO = 10L * 1024 * 1024 * 1024 }
+    companion object {
+        const val GOOGLE_MAX_VIDEO = 10L * 1024 * 1024 * 1024
+        const val EXTRA_AUTO_RESUME = "autoResume"
+    }
 }

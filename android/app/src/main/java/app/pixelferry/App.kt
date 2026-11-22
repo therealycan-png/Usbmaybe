@@ -28,7 +28,7 @@ class App : Application() {
 object Hub {
     val ledger by lazy { SqliteLedger(App.instance) }
     val storage by lazy { AndroidStorage(App.instance) }
-    val engine by lazy { IngestEngine(storage, ledger).also { e -> e.onStored = { bytes, at -> tracker.noteStored(bytes, at) } } }
+    val engine by lazy { IngestEngine(storage, ledger).also { e -> e.onStored = { bytes, at -> tracker.noteStored(bytes, at) }; e.onWarning = { run.errors += it } } }
     val tracker by lazy {
         val prefs = App.instance.getSharedPreferences("pf", 0)
         BackupTracker(ledger,
@@ -62,6 +62,8 @@ class RunState {
     @Volatile var phase = Phase.IDLE
     /** Device the last run was from, e.g. "Mom's iPhone13". */
     @Volatile var deviceLabel = ""
+    /** File-name tag of the last run, e.g. "Mom_iPhone13" (to find them in Google Photos). */
+    @Volatile var tag = ""
     @Volatile var active = false
     @Volatile var title = "Idle"
     @Volatile var detail = ""

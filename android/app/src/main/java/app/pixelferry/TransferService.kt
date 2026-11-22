@@ -132,6 +132,7 @@ class TransferService : Service() {
         val r = Hub.run
         r.errors.clear()
         r.deviceLabel = "${job.profile.owner}'s ${job.profile.label}"
+        r.tag = app.pixelferry.core.Naming.tag(job.profile.owner, job.profile.label)
         r.phase = Phase.COPYING
         r.active = true; r.title = "Copying from ${r.deviceLabel}"; r.detail = "Getting started…"
         r.done = 0; r.bytesDone = 0; r.duplicates = 0; r.failed = 0; r.skipped = 0; r.startedAt = System.currentTimeMillis()
@@ -155,12 +156,15 @@ class TransferService : Service() {
             LoopEnd.UNPLUGGED -> {
                 r.phase = Phase.UNPLUGGED
                 r.title = "Cable unplugged"
-                r.detail = "Plug ${r.deviceLabel} back in and tap Resume. Nothing is copied twice."
+                r.detail = "Plug ${r.deviceLabel} back in and unlock it, then tap Resume. Nothing is copied twice."
                 Notifs.alert(this, r.title, r.detail); return
             }
             LoopEnd.FINISHED -> {}
         }
-        val summary = "${p.stored} new, ${p.duplicates} duplicates skipped, ${p.skipped} already done, ${p.failed} failed."
+        val summary = listOfNotNull("%,d copied".format(p.stored),
+            if (p.skipped > 0) "%,d already sent before".format(p.skipped) else null,
+            if (p.duplicates > 0) "%,d exact copies skipped".format(p.duplicates) else null,
+            if (p.failed > 0) "%,d left on the device".format(p.failed) else null).joinToString(" · ")
         finalWave(summary, job.profile)
     }
 
@@ -205,9 +209,10 @@ class TransferService : Service() {
 
     private fun runDelete(src: MediaSource) {
         val r = Hub.run
+        val name = Hub.ledger.device(src.deviceKey)?.let { "${it.owner}'s ${it.label}" } ?: src.suggestedLabel
         r.phase = Phase.DELETING
-        r.active = true; r.title = "Deleting from ${src.suggestedLabel}"; r.detail = "Checking the device…"
-        if (!src.canDelete) { r.title = "Not deleting"; r.detail = "This device has no serial number, so it can't be safely identified."; return }
+        r.active = true; r.title = "Deleting from $name"; r.detail = "Checking the device…"
+        if (!src.canDelete) { r.phase = Phase.STOPPED; r.title = "Not deleting"; r.detail = "This device has no serial number, so it can't be safely identified."; return }
         val ok = Hub.ledger.deletableFor(src.deviceKey).associateBy { it.itemKey }
         val entries = src.list { r.detail = "Reading device… $it" }.filter { it.itemKey in ok }
         r.total = entries.size; r.done = 0; r.bytesDone = 0; r.bytesTotal = entries.sumOf { it.approxSize }; r.failed = 0
@@ -220,13 +225,14 @@ class TransferService : Service() {
             r.detail = "Deleted ${r.done} of ${r.total}"; updateNotif()
         }
         r.phase = Phase.DELETE_DONE
-        r.title = "Space freed on ${src.suggestedLabel} 🎉"
+        r.title = "Space freed on $name 🎉"
         r.detail = "Removed ${r.done - r.failed} files from ${src.suggestedLabel}" + if (r.failed > 0) " (${r.failed} could not be removed)." else "."
     }
 
     // ---------------- Wi-Fi receiver for computers ----------------
 
     private var waveThread: Thread? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     private fun startReceiver() {
         try {
@@ -235,6 +241,8 @@ class TransferService : Service() {
         } catch (e: Exception) {
             receiver?.stop(); receiver = null; pairingCode = null
         discovery?.stop(); discovery = null
+        multicastLock?.let { if (it.isHeld) it.release() }; multicastLock = null
+        if (Hub.run.phase == Phase.RECEIVING) { Hub.run.phase = Phase.IDLE; Hub.run.total = 0 }
             Hub.run.phase = Phase.ERROR
             Hub.run.title = "Couldn't get ready for the computer"; Hub.run.detail = "Check the Pixel is on Wi-Fi, then tap 'A computer' again."
             main.post { syncLocks(); maybeStop() }
@@ -246,7 +254,7 @@ class TransferService : Service() {
 
     @Synchronized private fun startReceiverInner() {
         if (receiver != null) return
-        val token = Pairing.newToken()
+        val token = sessionToken(this)
         val srv = ReceiverServer(Hub.engine, Hub.ledger, TlsIdentity.sslContext(), token, object : ReceiverServer.Listener {
             override fun onStored(name: String, size: Long) {
                 Hub.wave.fileStored()
@@ -259,12 +267,12 @@ class TransferService : Service() {
             override fun isWaitingForBackup() = Hub.wave.phase == app.pixelferry.core.WaveCoordinator.Phase.WAITING
             override fun statusMessage() = "${Hub.run.title}. ${Hub.run.detail}"
             override fun log(msg: String) { Hub.run.errors += msg }
-        }, trustedTokens = { computerKeys(this) }, onPaired = { k ->
-            val p = getSharedPreferences("pf", 0)
-            p.edit().putStringSet("computerKeys", computerKeys(this) + k).apply()
-        })
+        }, trustedTokens = { computerKeys(this) }, onPaired = { k -> addComputerKey(this, k) })
         srv.start()
         receiver = srv
+        @Suppress("DEPRECATION")
+        multicastLock = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager)
+            .createMulticastLock("pixelferry:discovery").apply { setReferenceCounted(false); acquire() } // let broadcast "where's the Pixel?" packets in
         discovery = app.pixelferry.core.Discovery({ srv.localPort }, Pairing.certPin(TlsIdentity.certDer())).also {
             try { it.start() } catch (_: Exception) { /* the address can still be typed */ }
         }
@@ -281,6 +289,8 @@ class TransferService : Service() {
     @Synchronized private fun stopReceiver() {
         receiver?.stop(); receiver = null; pairingCode = null
         discovery?.stop(); discovery = null
+        multicastLock?.let { if (it.isHeld) it.release() }; multicastLock = null
+        if (Hub.run.phase == Phase.RECEIVING) { Hub.run.phase = Phase.IDLE; Hub.run.total = 0 }
         wifiLock?.let { if (it.isHeld) it.release() }; wifiLock = null
         syncLocks()
     }
@@ -298,8 +308,23 @@ class TransferService : Service() {
         @Volatile var receiver: ReceiverServer? = null
         @Volatile var discovery: app.pixelferry.core.Discovery? = null
 
+        /** At most 20 remembered computers (oldest dropped), updated atomically. */
+        @Synchronized fun addComputerKey(ctx: Context, k: String) {
+            val p = ctx.getSharedPreferences("pf", 0)
+            val list = (p.getString("computerKeyList", "") ?: "").split(",").filter { it.isNotBlank() } + k
+            val keep = list.takeLast(20)
+            p.edit().putString("computerKeyList", keep.joinToString(",")).putStringSet("computerKeys", keep.toSet()).commit()
+        }
+
         fun computerKeys(ctx: Context): Set<String> = ctx.getSharedPreferences("pf", 0).getStringSet("computerKeys", emptySet())!!.toSet()
-        fun forgetComputers(ctx: Context) = ctx.getSharedPreferences("pf", 0).edit().remove("computerKeys").apply()
+        /** Forget every paired computer AND make a new code, so old codes/bundles stop working. */
+        fun forgetComputers(ctx: Context) = ctx.getSharedPreferences("pf", 0).edit().remove("computerKeys").remove("computerKeyList").remove("sessionToken").apply()
+
+        /** The code's secret part stays the same until "Forget paired computers" (so a shared sender keeps working). */
+        fun sessionToken(ctx: Context): String {
+            val p = ctx.getSharedPreferences("pf", 0)
+            return p.getString("sessionToken", null) ?: Pairing.newToken().also { p.edit().putString("sessionToken", it).apply() }
+        }
         @Volatile var pairingCode: String? = null
 
         fun send(ctx: Context, action: String) {

@@ -138,6 +138,14 @@ class DesktopSenderE2ETest {
             val (_, again) = py(home, "send", pcPhotos.path, "--owner", "Shawn", "--device", "Laptop")
             assertTrue(again.contains("To send now: 0"), again)
 
+            // "Forget paired computers" on the Pixel: the old key stops working, the sender says so and recovers with the code
+            computerKeys.clear()
+            val (fExit, forgot) = py(home, "send", pcPhotos.path, "--owner", "Shawn", "--device", "Laptop")
+            assertNotEquals(0, fExit); assertTrue(forgot.contains("removed from the Pixel"), forgot)
+            assertFalse(File(home, ".pixelferry/settings.json").readText().contains(Pairing.certPin(der)), "stale key forgotten")
+            val (_, repaired) = py(home, "send", pcPhotos.path, "--code", code, "--owner", "Shawn", "--device", "Laptop")
+            assertTrue(repaired.contains("To send now: 0"), repaired)
+
             // a new photo that Google has NOT backed up yet
             File(pcPhotos, "IMG_new.jpg").writeBytes(rnd.nextBytes(50_000))
             // double-click ("guided") mode: answers typed in, no command line needed

@@ -41,6 +41,14 @@ android {
     testOptions { unitTests.isIncludeAndroidResources = true }
 }
 
+// The computer sender ships inside the app, so the Pixel can hand it to your computer.
+val copySender by tasks.registering(Copy::class) {
+    from(rootProject.file("../desktop")) { include("pixelferry_send.py", "PixelFerry Send.bat", "pixelferry-send.sh") }
+    into(layout.buildDirectory.dir("generated/senderAssets/sender"))
+}
+android.sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/senderAssets"))
+tasks.named("preBuild") { dependsOn(copySender) }
+
 dependencies {
     implementation(project(":core"))
     testImplementation("junit:junit:4.13.2")

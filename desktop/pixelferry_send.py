@@ -160,7 +160,7 @@ def discover(timeout=2.0):
                     data, (ip, _) = s.recvfrom(256)
                     parts = data.decode("ascii", "replace").split()
                     if len(parts) == 4 and parts[0] == "PIXELFERRY" and parts[1] == "1":
-                        found[parts[3]] = (ip, int(parts[2]), parts[3])
+                        found[(ip, parts[2], parts[3])] = (ip, int(parts[2]), parts[3])
             except (socket.timeout, OSError):
                 pass
             if found:
@@ -182,9 +182,16 @@ def remember_pairing(pin, token):
     save_settings(st)
 
 
+def forget_pairing(pin):
+    st = load_settings()
+    st.get("pixels", {}).pop(pin, None)
+    save_settings(st)
+
+
 class Pixel:
     def __init__(self, host, port, code=None, timeout=120, token=None, pin=None):
         self.host, self.port, self.timeout = host, port, timeout
+        self.saved_key = not code
         if code:
             self.token, self.pin = parse_code(code)
         else:
@@ -230,6 +237,9 @@ class Pixel:
         if r.getheader("Connection", "").lower() == "close":
             self.close()
         if r.status == 401:
+            if self.saved_key:
+                forget_pairing(self.pin)
+                sys.exit("This computer was removed from the Pixel (\"Forget paired computers\"). Run again and enter the new code.")
             sys.exit("STOPPED: the Pixel didn't accept the code. Check the code shown in PixelFerry and try again.")
         if r.status == 429:
             sys.exit("STOPPED: too many wrong codes from this computer; the Pixel blocks it for 5 minutes.")
@@ -308,8 +318,12 @@ def connect(a):
     host, port, pin = a.to, a.port, None
     if not host:
         found = discover()
-        mine = [f for f in found if f[2] in saved]
-        pick = (mine or found or [None])[0]
+        want = parse_code(a.code)[1] if a.code else None
+        if want:
+            mine = [f for f in found if f[2] == want]   # the Pixel whose code was typed
+        else:
+            mine = [f for f in found if f[2] in saved]
+        pick = (mine or ([] if want else found) or [None])[0]
         if pick is None:
             sys.exit("Couldn't find the Pixel on this Wi-Fi. In PixelFerry tap 'A computer', check both are on the same Wi-Fi, "
                      "or pass --to with the address shown on the Pixel.")
@@ -330,7 +344,7 @@ def connect(a):
             except SystemExit:
                 continue
             except OSError:
-                break
+                sys.exit(f"Couldn't reach the Pixel at {host}. Is PixelFerry open on 'A computer', on the same Wi-Fi?")
         sys.exit("First time with this Pixel: add --code with the code shown in PixelFerry.")
     if pin not in saved:
         sys.exit("First time with this Pixel: add --code with the code shown in PixelFerry.")
@@ -483,8 +497,10 @@ def load_settings():
 
 def save_settings(d):
     os.makedirs(STATE_DIR, exist_ok=True)
-    with open(SETTINGS, "w") as f:
+    tmp = SETTINGS + ".tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:  # keys: owner-only
         json.dump(d, f)
+    os.replace(tmp, SETTINGS)
 
 
 def ask(prompt, default=None):
@@ -510,14 +526,28 @@ def pick_folder():
     return ask("Folder with your photos (you can drag it into this window)").strip('"').strip("'")
 
 
-def guided():
+def bundled_code():
+    """The 'Send to my computer' bundle from the Pixel includes the code, so nothing has to be typed."""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pixelferry-pairing.txt")
+    try:
+        with open(p) as f:
+            for line in f:
+                c = line.strip()
+                if len(c.replace("-", "")) == 24:
+                    return c
+    except OSError:
+        pass
+    return None
+
+
+def guided(folder=None):
     """Double-click mode: asks a few questions, remembers the answers."""
     print("=" * 56)
     print("  PixelFerry: send photos to your Pixel, full quality")
     print("=" * 56)
-    print("On the Pixel: open PixelFerry > tap 'A computer'. It shows an address and a code.\n")
+    print("On the Pixel: open PixelFerry and tap 'A computer'.\n")
     st = load_settings()
-    folder = pick_folder()
+    folder = folder or pick_folder()
     if not folder or not os.path.isdir(folder):
         print("No folder chosen. Nothing sent.")
         return
@@ -533,7 +563,12 @@ def guided():
             print(f"Found a Pixel at {found[0][0]}.")
         else:
             extra += ["--to", ask("Couldn't find it automatically. Pixel address (shown in PixelFerry)", st.get("to"))]
-        extra += ["--code", ask("Code shown in PixelFerry (only needed this first time)")]
+        code = bundled_code()
+        if code:
+            print("Using the pairing code that came with this sender.")
+        else:
+            code = ask("Code shown in PixelFerry (only needed this first time)")
+        extra += ["--code", code]
     owner = ask("Whose photos are these? (e.g. Shawn)", st.get("owner"))
     device = ask("Which computer? (e.g. Laptop)", st.get("device") or socket.gethostname()[:20])
     st.update({"owner": owner, "device": device})
@@ -546,6 +581,14 @@ def guided():
     except SystemExit as e:
         if e.code not in (None, 0):
             print(e.code)
+            if "removed from the Pixel" in str(e.code):
+                code = bundled_code() or ask("New code shown in PixelFerry")
+                extra = [x for i, x in enumerate(extra) if x != "--code" and extra[i - 1:i] != ["--code"]] + ["--code", code]
+                try:
+                    main(["send", folder, "--owner", owner, "--device", device] + extra)
+                except SystemExit as e2:
+                    if e2.code not in (None, 0):
+                        print(e2.code)
     print()
     if ask("Delete the photos Google Photos has already backed up from this folder? (yes/no)", "no").lower() == "yes":
         try:
@@ -578,11 +621,15 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
+    if len(sys.argv) == 1 or (len(sys.argv) == 2 and os.path.isdir(sys.argv[1])):
+        # double-click (or a folder dropped on it / chosen by the Windows launcher)
         try:
-            guided()
-        except KeyboardInterrupt:
+            guided(sys.argv[1] if len(sys.argv) == 2 else None)
+        except (KeyboardInterrupt, EOFError):
             print("\nStopped. Run it again any time: finished files are skipped.")
-        input("\nPress Enter to close.")
+        try:
+            input("\nPress Enter to close.")
+        except EOFError:
+            pass
     else:
         main()

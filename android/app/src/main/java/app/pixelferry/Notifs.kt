@@ -49,8 +49,7 @@ object Notifs : WaveNotifier {
     override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {
         Hub.run.phase = Phase.WAITING_GOOGLE
         Hub.run.title = "Pixel is full: waiting for Google"
-        Hub.run.detail = "Google Photos is backing up this batch (usually 10–30 min on Wi-Fi). Then space is freed and copying continues by itself." +
-            if (attempt >= 1) "\nStill waiting? Check that the PixelFerry folder has backup turned on in Google Photos." else ""
+        Hub.run.detail = "Google Photos is backing up this batch (usually 10–30 min), then copying continues by itself."
     }
 
     override fun stuck(reason: String) {

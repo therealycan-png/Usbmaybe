@@ -133,15 +133,36 @@ class MainActivity : Activity() {
     private val detailsLink by lazy { link("Show details", C.INK2) {
         AlertDialog.Builder(this).setTitle("Details").setMessage(Hub.run.errors.takeLast(20).joinToString("\n\n")).setPositiveButton("OK", null).show()
     } }
+    private var helpOpen = false
+    private val takingLong by lazy { link("Taking long?") { helpOpen = true } }
+    private val resumeBtn by lazy { btn("Resume", primary = true) { resume() } }
+    private val seeBtn by lazy { btn("See them in Google Photos") { seeInPhotos(Hub.run.tag) } }
+
+    private fun resume() {
+        val src = Hub.source
+        if (src != null && src.isConnected()) startActivity(Intent(this, PickActivity::class.java).putExtra(PickActivity.EXTRA_AUTO_RESUME, true))
+        else AlertDialog.Builder(this).setTitle("Plug it back in")
+            .setMessage("Plug ${Hub.run.deviceLabel.ifEmpty { "the device" }} back into the Pixel and unlock it. PixelFerry opens it and continues where it stopped. Nothing is copied twice.")
+            .setPositiveButton("OK") { _, _ -> getSharedPreferences("pf", 0).edit().putBoolean("autoResume", true).apply() }.show()
+    }
+
+    /** Opens a Google Photos search for the file tag (e.g. Mom_iPhone13). */
+    private fun seeInPhotos(tag: String) {
+        val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://photos.google.com/search/" + Uri.encode(tag)))
+        try { startActivity(i.setPackage(PhotosWatcher.PHOTOS)) } catch (_: Exception) {
+            try { startActivity(Intent(Intent.ACTION_VIEW, i.data)) } catch (_: Exception) { toast("In Google Photos, search $tag") }
+        }
+    }
+
     /** Stays on screen while waiting (a toast would vanish). */
     private val freeHelp by lazy {
-        text("If it's taking long, you can do it yourself:\n1. Tap Free up space now\n2. In Google Photos tap Free up space\n3. Tap the blue Free up button\nPixelFerry continues by itself.", 15f, C.INK).apply {
+        text("You can do it yourself:\n1. Tap Free up space now\n2. In Google Photos tap Free up space\n3. Tap the blue Free up button\nPixelFerry continues by itself.", 15f, C.INK).apply {
             background = rounded(C.TINT_AMBER, dpf(14f)); setPadding(dp(14), dp(12), dp(14), dp(12))
         }
     }
     private val runCard by lazy {
         card().add(runChip, runTitle, centered(ring).apply { setPadding(0, dp(12), 0, dp(4)) }, stats,
-            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, freeHelp, freeBtn, folderTip, detailsLink, stopBtn)
+            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, resumeBtn, seeBtn, freeBtn, takingLong, freeHelp, folderTip, detailsLink, stopBtn)
     }
     /** Google backs up a new device folder only after one switch in Google Photos: ask right away, not hours later. */
     private val folderTip by lazy {
@@ -149,7 +170,7 @@ class MainActivity : Activity() {
             background = rounded(C.TINT_BLUE, dpf(14f)); setPadding(dp(14), dp(12), dp(14), dp(6))
             (layoutParams as? LinearLayout.LayoutParams)?.topMargin = dp(10)
             addView(text("One tap so Google backs these up", 16f, C.INK, bold = true))
-            addView(text("Google Photos › profile picture › Photos settings › Backup › Back up device folders › turn on the PixelFerry folder for this device.", 15f, C.INK))
+            addView(text("1. Open Google Photos\n2. Tap your profile picture\n3. Photos settings › Backup\n4. Back up device folders\n5. Turn on the PixelFerry folder", 15f, C.INK))
             addView(link("Open Google Photos") { packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) } })
             addView(link("It's on", C.INK2) { getSharedPreferences("pf", 0).edit().putBoolean("folderOk_${Hub.run.deviceLabel}", true).apply(); visibility = View.GONE })
         }
@@ -178,22 +199,31 @@ class MainActivity : Activity() {
             runTitle.text = r.title
             runDetail.text = r.detail + if (r.failed > 0) "\n⚠ %,d file(s) couldn't be copied and were left on the device.".format(r.failed) else ""
             detailsLink.visibility = if (r.errors.isNotEmpty()) View.VISIBLE else View.GONE
-            freeHelp.visibility = if (waiting) View.VISIBLE else View.GONE
-            folderTip.visibility = if (r.active && r.phase in setOf(Phase.COPYING, Phase.WAITING_GOOGLE, Phase.FINISHING) && r.done > 0 &&
+            freeHelp.visibility = if (waiting && helpOpen) View.VISIBLE else View.GONE
+            takingLong.visibility = if (waiting && !helpOpen) View.VISIBLE else View.GONE
+            resumeBtn.visibility = if (!r.active && r.phase in setOf(Phase.UNPLUGGED, Phase.STOPPED, Phase.ERROR) && r.total > r.done) View.VISIBLE else View.GONE
+            resumeBtn.text = "Resume · %,d left".format((r.total - r.done).coerceAtLeast(0))
+            seeBtn.visibility = if (!r.active && r.phase in setOf(Phase.DONE, Phase.DONE_PENDING_GOOGLE) && r.tag.isNotEmpty()) View.VISIBLE else View.GONE
+            folderTip.visibility = if (r.active && !waiting && r.phase in setOf(Phase.COPYING, Phase.FINISHING) && r.done > 0 &&
                 !getSharedPreferences("pf", 0).getBoolean("folderOk_${r.deviceLabel}", false)) View.VISIBLE else View.GONE
             val frac = if (r.bytesTotal > 0) r.bytesDone.toFloat() / r.bytesTotal else 0f
             ring.indeterminate = r.active && r.total == 0
             ring.fraction = frac
             ring.center = "${(frac * 100).toInt()}%"
-            ring.caption = if (r.duplicates > 0) "${r.duplicates} duplicates skipped" else fmt(r.bytesDone)
+            ring.caption = if (r.active) fmt(r.bytesDone) else ""
             val el = (System.currentTimeMillis() - r.startedAt).coerceAtLeast(1)
             val speed = if (r.startedAt > 0) r.bytesDone * 1000 / el else 0
             val left = if (speed > 0 && r.active && !waiting) (r.bytesTotal - r.bytesDone) / speed else -1
             setStat("files", "%,d".format(r.done))
             (stats.findViewWithTag<android.widget.TextView>("files")?.parent as? LinearLayout)?.getChildAt(1)
                 ?.let { (it as android.widget.TextView).text = "of %,d files".format(r.total) }
-            setStat("speed", if (r.active) "${fmt(speed)}/s" else "–")
-            setStat("time left", when { waiting -> "waiting"; left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
+            setStat("speed", if (r.active) "${fmt(speed)}/s" else fmt(r.bytesDone))
+            (stats.findViewWithTag<android.widget.TextView>("speed")?.parent as? LinearLayout)?.getChildAt(1)
+                ?.let { (it as android.widget.TextView).text = if (r.active) "speed" else "copied" }
+            val took = (System.currentTimeMillis() - r.startedAt) / 1000
+            (stats.findViewWithTag<android.widget.TextView>("time left")?.parent as? LinearLayout)?.getChildAt(1)
+                ?.let { (it as android.widget.TextView).text = if (r.active) "time left" else "took" }
+            setStat("time left", when { !r.active && r.startedAt > 0 -> dur(took); waiting -> "~20 min"; left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
             freeBtn.visibility = if (waiting) View.VISIBLE else View.GONE
             stopBtn.visibility = if (r.active) View.VISIBLE else View.GONE
         }
@@ -204,6 +234,8 @@ class MainActivity : Activity() {
         if (r.active) runCard.tag = null
         ui.postDelayed({ tick() }, 1000)
     }
+
+    private fun dur(sec: Long) = when { sec < 60 -> "<1 min"; sec < 3600 -> "${sec / 60} min"; else -> "${sec / 3600} h ${sec % 3600 / 60} m" }
 
     private fun setStat(label: String, value: String) { (stats.findViewWithTag<android.widget.TextView>(label))?.text = value }
 
@@ -248,7 +280,7 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this).setTitle("Plug in by cable")
             .setMessage("📱 iPhone / iPad\nUnlock it and tap Trust or Allow.\nFor full quality once: iPhone Settings › Photos › Transfer to Mac or PC › Keep Originals.\n\n" +
                 "📲 Oppo, OnePlus, other Android\nOn that device, tap the USB notification and choose File transfer.\n\n" +
-                "📷 Insta360 or camera\nSet USB mode to MTP/PTP. In \"storage\" mode, use the folder option instead.\n\n" +
+                "📷 Insta360 or camera\nIn its USB settings pick \"Camera\" or \"File transfer\". If it only offers \"Storage\", use the folder option instead.\n\n" +
                 "Nothing appears? On this Pixel tap the USB notification › \"USB controlled by: This device\".")
             .setPositiveButton("Got it", null).show()
     }
@@ -273,7 +305,7 @@ class MainActivity : Activity() {
                 if (isFinishing || isDestroyed) { src?.let { Hub.source = it }; return@runOnUiThread }
                 if (src == null) {
                     AlertDialog.Builder(this).setTitle("Almost there")
-                        .setMessage("The device needs to allow access first:\n\n📱 iPhone: unlock it and tap Trust / Allow.\n📲 Android: tap its USB notification › File transfer.\n📷 Camera: set USB mode to MTP/PTP.\n\nThen tap the device again.")
+                        .setMessage("The device needs to allow access first:\n\n📱 iPhone: unlock it and tap Trust / Allow.\n📲 Android: tap its USB notification › File transfer.\n📷 Camera: in its USB settings pick Camera or File transfer.\n\nThen tap the device again.")
                         .setPositiveButton("OK", null).show()
                 } else {
                     Hub.source = src
@@ -302,11 +334,15 @@ class MainActivity : Activity() {
         val ip = wifiIp()
         val c = card(C.TINT_VIOLET)
         c.add(chip("●  Ready for your computer", C.PRIMARY2, C.CARD), h("Send from your computer"),
-            p("1. On your Windows or Linux computer, double-click  PixelFerry Send\n2. Choose the photo folder\n3. It finds this Pixel by itself. The first time only, it asks for this code:"))
-        c.add(text("Address", 13f, C.INK2).apply { setPadding(0, dp(12), 0, 0) }, text(ip, 26f, C.INK, bold = true).apply { setTextIsSelectable(true) },
-            text("Pairing code", 13f, C.INK2).apply { setPadding(0, dp(8), 0, 0) },
+            p("First time: get the sender onto your computer. It already contains this Pixel's code, so there's nothing to type."),
+            btn("Send to my computer", primary = true, color = C.PRIMARY2) { app.pixelferry.ShareProvider.shareSender(this, code) },
+            text("Use Nearby Share, Google Drive or a USB cable. Some email apps block it. Only send it to your own computer.", 13.5f, C.INK2).apply { setPadding(0, dp(6), 0, dp(10)) },
+            p("Then on the computer: extract it and double-click  PixelFerry Send, then choose the photo folder. It finds this Pixel by itself."),
+            text("Or type the code by hand if it asks:", 14f, C.INK2).apply { setPadding(0, dp(10), 0, 0) })
+        c.add(text("Pairing code", 13f, C.INK2).apply { setPadding(0, dp(8), 0, 0) },
             text(code, 24f, C.PRIMARY2, bold = true).apply { typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD); setTextIsSelectable(true) },
-            p("🔒 Encrypted and locked to this Pixel. A new code is made each time.", 14f),
+            text("Pixel address (only if it can't find it): $ip", 14f, C.INK2).apply { setTextIsSelectable(true); setPadding(0, dp(8), 0, 0) },
+            p("🔒 Encrypted and locked to this Pixel. \"Forget paired computers\" makes a new code.", 14f),
             link("Forget paired computers", C.INK2) {
                 TransferService.forgetComputers(this); toast("Computers will need the code again")
             },
@@ -321,7 +357,7 @@ class MainActivity : Activity() {
 
     // ---------------- delete from source ----------------
     private fun renderDelete() {
-        val src = Hub.source
+        val src = Hub.source?.takeIf { it.isConnected() }
         if (src == null) {
             thread {
                 // remind which devices have backed-up photos waiting to be deleted
@@ -374,7 +410,7 @@ class MainActivity : Activity() {
     private fun confirmDelete(label: String, n: Int, bytes: Long) {
         AlertDialog.Builder(this)
             .setTitle("Delete %,d files from $label?".format(n))
-            .setMessage("These files (${fmt(bytes)}) were copied to the Pixel, checked byte for byte, and Google Photos has backed them up.\n\nFiles not backed up yet are NOT included.")
+            .setMessage("These files (${fmt(bytes)}) were copied to the Pixel, checked byte for byte, and Google Photos has backed them up.\n\nFiles not backed up yet are NOT included.\n\nOne last thing: Google Photos must be on Original quality (you checked this in setup).")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Continue") { _, _ ->
                 AlertDialog.Builder(this)
