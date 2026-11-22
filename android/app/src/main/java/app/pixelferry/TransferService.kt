@@ -159,6 +159,12 @@ class TransferService : Service() {
                 r.detail = "Plug ${r.deviceLabel} back in and unlock it, then tap Resume. Nothing is copied twice."
                 Notifs.alert(this, r.title, r.detail); return
             }
+            LoopEnd.ALL_FAILING -> {
+                r.phase = Phase.ERROR
+                r.title = "Stopped: the first files didn't copy"
+                r.detail = "Nothing was lost or deleted. Tap Show details and send that to whoever is helping you."
+                Notifs.alert(this, r.title, r.detail); return
+            }
             LoopEnd.FINISHED -> {}
         }
         val summary = listOfNotNull("%,d copied".format(p.stored),

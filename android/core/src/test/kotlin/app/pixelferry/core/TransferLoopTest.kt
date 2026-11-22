@@ -89,4 +89,20 @@ class TransferLoopTest {
         assertTrue(saved in 10..13, "stops within the pipeline depth: $saved")
         assertEquals(saved, loop.progress.stored, "every file already received is verified and counted, none lost")
     }
+
+    @Test fun stops_early_when_every_file_fails() {
+        val phone = object : CopySource {
+            var calls = 0
+            override fun isConnected() = true
+            override fun copyTo(entry: SourceEntry, dest: File) { calls++; throw IOException("device refused") }
+        }
+        val entries = (0 until 2320).map { SourceEntry("k$it", "IMG_$it.jpg", 100, it.toLong(), "DCIM", "$it") }
+        val ledger = MemoryLedger()
+        val engine = IngestEngine(FakeStorage(tempDir()), ledger, reserveBytes = 0)
+        val wave = WaveCoordinator(engine, BackupTracker(ledger), noSignals, object : FreeUpAction { override fun requestFreeUp(auto: Boolean) = true }, silent)
+        val loop = TransferLoop(engine, wave, ledger, cancelled = { false }, retryDelayMs = 0)
+        assertEquals(LoopEnd.ALL_FAILING, loop.run(DeviceProfile("d", "S", "Pad"), phone, entries))
+        assertTrue(phone.calls < 30, "gave up after a handful, not 2,320 files: ${phone.calls}")
+        assertEquals(0, ledger.byState(ItemState.VERIFIED).size)
+    }
 }

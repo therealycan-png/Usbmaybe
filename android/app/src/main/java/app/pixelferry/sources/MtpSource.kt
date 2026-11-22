@@ -112,36 +112,77 @@ class MtpSource private constructor(
         return if (s == 0xFFFFFFFFL) UNKNOWN_SIZE else s
     }
 
-    override fun copyTo(entry: SourceEntry, dest: File) = synchronized(mtp) {
-        if (entry.size == UNKNOWN_SIZE && copyChunked64(entry, dest)) return@synchronized
+    override fun copyTo(entry: SourceEntry, dest: File) { copyHashed(entry, dest) }
+
+    /** Which partial-read call this device answers (decided on the first file, then reused). */
+    private enum class ReadMode { UNKNOWN, P64, P32, IMPORT }
+    @Volatile private var mode = ReadMode.UNKNOWN
+    private var chunk = CHUNK
+
+    /**
+     * Reads the file in chunks with GetPartialObject(64) and hashes it on the way (no second read).
+     * Tried in order: 64-bit partial reads (Android phones/tablets), 32-bit (iPhone, cameras),
+     * and only then the one-shot importFile, which fails on some newer devices (seen with a
+     * OnePlus Pad 3 on a Pixel XL).
+     * @return SHA-256 of the bytes written, or null if importFile was used (then it's read back).
+     */
+    override fun copyHashed(entry: SourceEntry, dest: File): String? = synchronized(mtp) {
+        if (!open) throw IOException("The device was unplugged")
+        val h = entry.ref.toInt()
+        if (mode != ReadMode.IMPORT) {
+            val sha = try { readChunked(h, entry.size, dest) } catch (e: IOException) {
+                if (!open) throw e
+                if (mode == ReadMode.UNKNOWN) null else throw e // a mode that worked before failing now = real error
+            }
+            if (sha != null) return@synchronized sha
+            mode = ReadMode.IMPORT
+        }
         val pfd = ParcelFileDescriptor.open(dest,
             ParcelFileDescriptor.MODE_WRITE_ONLY or ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_TRUNCATE)
         pfd.use {
-            if (!mtp.importFile(entry.ref.toInt(), it)) throw IOException("Device stopped sending ${entry.name} (unplugged or locked?)")
+            if (!mtp.importFile(h, it)) throw IOException("The device refused to send ${entry.name}. Keep it unlocked; on Android devices pick \"File transfer\".")
         }
+        null
     }
 
-    /**
-     * Files over 4 GB: Android phones support 64-bit partial reads, so read in chunks to the end.
-     * @return false if the device doesn't support it (iPhone); then the normal path is tried and
-     *         the size-free MP4 check decides.
-     */
-    private fun copyChunked64(entry: SourceEntry, dest: File): Boolean {
-        val h = entry.ref.toInt()
-        val buf = ByteArray(CHUNK)
-        dest.outputStream().buffered(CHUNK).use { o ->
+    /** @return SHA-256, or null if this device supports no partial-read call. */
+    private fun readChunked(h: Int, size: Long, dest: File): String? {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        var buf = ByteArray(chunk)
+        dest.outputStream().buffered(1 shl 16).use { o ->
             var off = 0L
-            while (true) {
-                val n = try { mtp.getPartialObject64(h, off, CHUNK.toLong(), buf) } catch (e: IOException) {
-                    if (off == 0L) return false
-                    break // some devices error instead of returning 0 at the end; Mp4Check verifies completeness
-                }
-                if (n <= 0) break
-                o.write(buf, 0, n.toInt()); off += n
-                if (n < CHUNK) break
+            while (size < 0 || off < size) {
+                val want = if (size < 0) buf.size.toLong() else minOf(buf.size.toLong(), size - off)
+                val n = readOnce(h, off, want, buf)
+                if (n < 0) return null // first read: no supported mode
+                if (n == 0L) break
+                o.write(buf, 0, n.toInt()); md.update(buf, 0, n.toInt()); off += n
+                if (size < 0 && n < want) break
+                if (buf.size != chunk) buf = ByteArray(chunk)
             }
         }
-        return true
+        return app.pixelferry.core.Hashing.hex(md.digest())
+    }
+
+    /** One chunk. Picks the read mode on the very first call. @return bytes read, or -1 if nothing works. */
+    private fun readOnce(h: Int, off: Long, want: Long, buf: ByteArray): Long {
+        when (mode) {
+            ReadMode.P64 -> return mtp.getPartialObject64(h, off, want, buf)
+            ReadMode.P32 -> {
+                if (off + want > 0xFFFFFFFFL) throw IOException("File over 4 GB: this device can't send it over the cable")
+                return mtp.getPartialObject(h, off, want, buf)
+            }
+            else -> {}
+        }
+        // first chunk ever: find what the device supports (big chunk, then a small one)
+        for (size in intArrayOf(CHUNK, 128 * 1024)) {
+            val w = minOf(want, size.toLong())
+            try { val n = mtp.getPartialObject64(h, off, w, buf); if (n >= 0) { mode = ReadMode.P64; chunk = size; return n } } catch (_: Exception) {}
+            if (!open) throw IOException("The device was unplugged")
+            try { val n = mtp.getPartialObject(h, off, w, buf); if (n >= 0) { mode = ReadMode.P32; chunk = size; return n } } catch (_: Exception) {}
+            if (!open) throw IOException("The device was unplugged")
+        }
+        return -1
     }
 
     override fun delete(entry: SourceEntry): Boolean = synchronized(mtp) {

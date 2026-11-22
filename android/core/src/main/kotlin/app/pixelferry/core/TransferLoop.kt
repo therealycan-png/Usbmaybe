@@ -42,7 +42,7 @@ class Progress {
     val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
 }
 
-enum class LoopEnd { FINISHED, CANCELLED, UNPLUGGED }
+enum class LoopEnd { FINISHED, CANCELLED, UNPLUGGED, ALL_FAILING }
 
 /**
  * Copies a selection oldest-first, as a two-stage pipeline so the cable never waits for the disk:
@@ -66,6 +66,8 @@ class TransferLoop(
     /** How many received files may wait for verification (bounds extra temp space). */
     private val pipelineDepth: Int = 2,
 ) {
+    companion object { const val FAIL_FAST = 6 }
+
     val progress = Progress()
     private var done: Set<String> = emptySet()
 
@@ -163,6 +165,9 @@ class TransferLoop(
     /** Stage 1 for one file. @return non-null to end the run. */
     private fun transfer(profile: DeviceProfile, source: CopySource, e: SourceEntry, attempt0: Int): LoopEnd? {
         if (cancelled()) return LoopEnd.CANCELLED
+        // Something is systematically wrong (device refuses, storage blocked): stop early and say so
+        // instead of grinding through thousands of files. Nothing is lost: failed files stay on the device.
+        if (progress.failed >= FAIL_FAST && progress.stored + progress.duplicates == 0) return LoopEnd.ALL_FAILING
         if (e.itemKey in done) { advance(e) { it.skipped++ }; return null }
         beforeEach()
         var attempt = attempt0

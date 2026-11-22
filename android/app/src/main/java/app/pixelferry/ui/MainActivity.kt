@@ -205,6 +205,7 @@ class MainActivity : Activity() {
             resumeBtn.text = "Resume · %,d left".format((r.total - r.done).coerceAtLeast(0))
             seeBtn.visibility = if (!r.active && r.phase in setOf(Phase.DONE, Phase.DONE_PENDING_GOOGLE) && r.tag.isNotEmpty()) View.VISIBLE else View.GONE
             folderTip.visibility = if (r.active && !waiting && r.phase in setOf(Phase.COPYING, Phase.FINISHING) && r.done > 0 &&
+                (r.done - r.failed - r.skipped) > 0 &&
                 !getSharedPreferences("pf", 0).getBoolean("folderOk_${r.deviceLabel}", false)) View.VISIBLE else View.GONE
             val frac = if (r.bytesTotal > 0) r.bytesDone.toFloat() / r.bytesTotal else 0f
             ring.indeterminate = r.active && r.total == 0
