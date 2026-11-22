@@ -62,7 +62,7 @@ class ScreenshotTest {
     }
 
     @Before fun reset() {
-        Hub.run.active = false; Hub.run.total = 0; Hub.run.errors.clear(); Hub.source = null
+        Hub.run.active = false; Hub.run.total = 0; Hub.run.errors.clear(); Hub.source = null; Hub.run.phase = Phase.IDLE
         App.instance.getSharedPreferences("pf", 0).edit().putBoolean("setupDone", true).commit()
     }
 
@@ -81,6 +81,27 @@ class ScreenshotTest {
         ShadowLooper.idleMainLooper()
         snap(a.window.decorView, "2_home_running")
         a.finish()
+    }
+
+    @Test fun home_waiting_for_google() {
+        val r = Hub.run
+        r.active = true; r.deviceLabel = "Mom's iPhone13"; r.title = "Pixel is full: waiting for Google"
+        r.total = 10_000; r.done = 5_120; r.bytesTotal = 42L shl 30; r.bytesDone = 21L shl 30; r.startedAt = System.currentTimeMillis() - 3_000_000
+        Hub.wave.beginWait(Long.MAX_VALUE / 8) // sets the waiting phase + text
+        r.phase = Phase.WAITING_GOOGLE
+        val a = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        ShadowLooper.idleMainLooper()
+        snap(a.window.decorView, "4_home_waiting")
+    }
+
+    @Test fun home_done() {
+        val r = Hub.run
+        r.active = false; r.phase = Phase.DONE; r.deviceLabel = "Mom's iPhone13"; r.title = "All done 🎉"
+        r.detail = "9,871 new, 129 duplicates skipped, 0 already done, 0 failed.\n9,871 files are backed up by Google and can be deleted from Mom's iPhone13."
+        r.total = 10_000; r.done = 10_000; r.bytesTotal = 42L shl 30; r.bytesDone = 42L shl 30; r.duplicates = 129; r.startedAt = System.currentTimeMillis() - 9_000_000
+        val a = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        ShadowLooper.idleMainLooper()
+        snap(a.window.decorView, "5_home_done")
     }
 
     @Test fun setup_wizard() {

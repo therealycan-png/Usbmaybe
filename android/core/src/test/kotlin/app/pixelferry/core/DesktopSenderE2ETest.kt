@@ -35,6 +35,8 @@ class DesktopSenderE2ETest {
         pb.environment()["HOME"] = home.path
         pb.environment()["USERPROFILE"] = home.path
         pb.environment()["PIXELFERRY_POLL_SECONDS"] = "0.3"
+        pb.environment()["PIXELFERRY_DISCOVERY_ADDR"] = "127.0.0.1"
+        pb.environment()["PIXELFERRY_DISCOVERY_PORT"] = udpPort.toString()
         val proc = pb.start()
         proc.outputStream.use { it.write(input.toByteArray()) }
         val out = proc.inputStream.bufferedReader().readText()
@@ -42,6 +44,23 @@ class DesktopSenderE2ETest {
         println(out)
         return proc.exitValue() to out
     }
+
+    /** Runs the sender with no arguments (double-click mode). Port goes through an env var for the test. */
+    private fun pyGuided(home: File, port: String, input: String): Pair<Int, String> {
+        val pb = ProcessBuilder("python3", script.path).redirectErrorStream(true)
+        pb.environment()["HOME"] = home.path
+        pb.environment()["PIXELFERRY_PORT"] = port
+        pb.environment()["PIXELFERRY_DISCOVERY_ADDR"] = "127.0.0.1"
+        pb.environment()["PIXELFERRY_DISCOVERY_PORT"] = udpPort.toString()
+        pb.environment()["DISPLAY"] = ""
+        val proc = pb.start()
+        proc.outputStream.use { it.write(input.toByteArray()) }
+        val out = proc.inputStream.bufferedReader().readText()
+        assertTrue(proc.waitFor(120, TimeUnit.SECONDS)); println(out)
+        return proc.exitValue() to out
+    }
+
+    private val udpPort = 18445 + (System.nanoTime() % 500).toInt()
 
     @Test fun full_flow() {
         val work = tempDir()
@@ -79,23 +98,28 @@ class DesktopSenderE2ETest {
         val (ctx, der) = sslContext(work)
         val token = Pairing.newToken()
         val code = Pairing.code(token, Pairing.certPin(der))
+        val computerKeys = java.util.concurrent.CopyOnWriteArraySet<String>()
         val server = ReceiverServer(engine, ledger, ctx, token, object : ReceiverServer.Listener {
             override fun onNeedSpace(bytes: Long) { needSpace.incrementAndGet() }
             override fun log(msg: String) = println("server: $msg")
-        }, port = 0)
+        }, port = 0, trustedTokens = { computerKeys }, onPaired = { computerKeys += it })
         server.start()
         val port = server.localPort.toString()
+        val discovery = Discovery({ server.localPort }, Pairing.certPin(der), udpPort).also { it.start() }
         try {
             // wrong code is refused
             val bad = Pairing.code(Pairing.newToken(), Pairing.certPin(der))
             val (badExit, badOut) = py(home, "send", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", bad, "--owner", "Shawn", "--device", "Laptop")
-            assertNotEquals(0, badExit); assertTrue(badOut.contains("wrong pairing code"))
+            assertNotEquals(0, badExit); assertTrue(badOut.contains("didn't accept the code"))
             // wrong certificate pin (someone pretending to be the Pixel) is refused before any data/token is sent
             val (pinExit, pinOut) = py(home, "send", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", Pairing.code(token, "Z".repeat(16)), "--owner", "S", "--device", "L")
             assertNotEquals(0, pinExit); assertTrue(pinOut.contains("NOT your Pixel"))
             assertTrue(ledger.byState(ItemState.VERIFIED).isEmpty())
 
-            val (exit, out) = py(home, "send", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", code, "--owner", "Shawn", "--device", "Laptop")
+            // first time: no address typed (found automatically), code typed once
+            val (exit, out) = py(home, "send", pcPhotos.path, "--code", code, "--owner", "Shawn", "--device", "Laptop")
+            assertTrue(out.contains("Found your Pixel at 127.0.0.1"), out)
+            assertEquals(1, computerKeys.size, "computer got its own key")
             assertEquals(0, exit, out)
             assertTrue(out.contains("Pixel is full"), "a wave pause happened")
             assertTrue(out.contains("Sent 12, duplicates skipped 1, failed 0"), out)
@@ -110,23 +134,28 @@ class DesktopSenderE2ETest {
             assertTrue(all.any { it.pixelPath!!.endsWith("Shawn_Laptop_VID_12_insv.mp4") })
 
             // re-run = nothing re-sent
-            val (_, again) = py(home, "send", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", code, "--owner", "Shawn", "--device", "Laptop")
+            // later: no address, no code
+            val (_, again) = py(home, "send", pcPhotos.path, "--owner", "Shawn", "--device", "Laptop")
             assertTrue(again.contains("To send now: 0"), again)
 
             // a new photo that Google has NOT backed up yet
             File(pcPhotos, "IMG_new.jpg").writeBytes(rnd.nextBytes(50_000))
-            val (_, third) = py(home, "send", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", code, "--owner", "Shawn", "--device", "Laptop")
+            // double-click ("guided") mode: answers typed in, no command line needed
+            // double-click mode, already paired: just the folder + two Enter presses (remembered answers)
+            val (_, third) = pyGuided(home, port, "${pcPhotos.path}\n\n\nno\n\n")
+            assertTrue(third.contains("already paired, no code needed"), third)
             assertTrue(third.contains("Sent 1,"), third)
+            assertTrue(File(home, ".pixelferry/settings.json").readText().contains("Shawn"), "answers remembered")
             assertEquals(ItemState.VERIFIED, ledger.find(ledger.byState(ItemState.VERIFIED).single().deviceKey, ledger.byState(ItemState.VERIFIED).single().itemKey)!!.state)
 
             // delete: cancelled at second confirmation -> nothing deleted
-            val (_, c1) = py(home, "delete-backed-up", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", code, input = "DELETE\nno\n")
+            val (_, c1) = py(home, "delete-backed-up", pcPhotos.path, input = "DELETE\nno\n")
             assertTrue(c1.contains("Cancelled")); assertEquals(15, pcPhotos.listFiles()!!.size)
 
             // only BACKED_UP ones (and their duplicates) are offered; still-on-Pixel ones are kept
             val backed = ledger.byState(ItemState.BACKED_UP).size
             assertEquals(12, backed)
-            val (_, c2) = py(home, "delete-backed-up", pcPhotos.path, "--to", "127.0.0.1", "--port", port, "--code", code, input = "DELETE\nyes\n")
+            val (_, c2) = py(home, "delete-backed-up", pcPhotos.path, input = "DELETE\nyes\n")
             assertTrue(c2.contains("Deleted"), c2)
             val left = pcPhotos.listFiles()!!.map { it.name }.toSet()
             assertTrue("notes.txt" in left)
@@ -135,7 +164,7 @@ class DesktopSenderE2ETest {
             assertEquals(setOf("notes.txt", "IMG_new.jpg"), left)
             assertEquals(13, ledger.byState(ItemState.SOURCE_DELETED).size)
         } finally {
-            server.stop(); google.interrupt()
+            server.stop(); discovery.stop(); google.interrupt()
         }
     }
 }

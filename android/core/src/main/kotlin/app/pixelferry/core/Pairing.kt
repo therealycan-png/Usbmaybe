@@ -31,6 +31,9 @@ object Pairing {
 
     fun newToken(): String { val b = ByteArray(5); rng.nextBytes(b); return base32(b) }
 
+    /** 160-bit key a paired computer keeps, so it never needs the code again. */
+    fun newLongToken(): String { val b = ByteArray(20); rng.nextBytes(b); return base32(b) }
+
     fun certPin(certDer: ByteArray): String =
         base32(MessageDigest.getInstance("SHA-256").digest(certDer)).substring(0, PIN_CHARS)
 

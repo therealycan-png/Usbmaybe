@@ -2,7 +2,10 @@
 """
 PixelFerry desktop sender (Windows / Linux / macOS). Python 3.8+, no extra packages.
 
-Send every photo/video in one or more folders to your Pixel XL, full quality:
+Easiest: double-click "PixelFerry Send" (Windows) or run ./pixelferry-send.sh (Linux).
+It asks for the folder, the Pixel's address and code, and remembers your answers.
+
+Or from a terminal, send every photo/video in one or more folders to your Pixel XL, full quality:
 
     python pixelferry_send.py send "D:\\Photos" --to 192.168.1.20 --code K7QM-2XHD-9F3B-WPRA-8C1N-ZT4E --owner Shawn --device Laptop
 
@@ -133,10 +136,59 @@ class HashCache:
         self.dirty = 0
 
 
+DISCOVERY_PORT = 8445
+
+
+def discover(timeout=2.0):
+    """Find PixelFerry on this Wi-Fi. Returns [(ip, https_port, pin)]. Answers carry no secrets:
+    the certificate pin is still checked over TLS before anything is sent."""
+    found = {}
+    targets = [os.environ.get("PIXELFERRY_DISCOVERY_ADDR", "255.255.255.255")]
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.settimeout(0.3)
+        end = time.time() + timeout
+        while time.time() < end:
+            for t in targets:
+                try:
+                    s.sendto(b"PIXELFERRY-DISCOVER 1", (t, int(os.environ.get("PIXELFERRY_DISCOVERY_PORT", DISCOVERY_PORT))))
+                except OSError:
+                    pass
+            try:
+                while True:
+                    data, (ip, _) = s.recvfrom(256)
+                    parts = data.decode("ascii", "replace").split()
+                    if len(parts) == 4 and parts[0] == "PIXELFERRY" and parts[1] == "1":
+                        found[parts[3]] = (ip, int(parts[2]), parts[3])
+            except (socket.timeout, OSError):
+                pass
+            if found:
+                break
+        s.close()
+    except OSError:
+        pass
+    return list(found.values())
+
+
+def paired():
+    """{certificate pin: computer key} for Pixels this computer has paired with."""
+    return load_settings().get("pixels", {})
+
+
+def remember_pairing(pin, token):
+    st = load_settings()
+    st.setdefault("pixels", {})[pin] = token
+    save_settings(st)
+
+
 class Pixel:
-    def __init__(self, host, port, code, timeout=120):
+    def __init__(self, host, port, code=None, timeout=120, token=None, pin=None):
         self.host, self.port, self.timeout = host, port, timeout
-        self.token, self.pin = parse_code(code)
+        if code:
+            self.token, self.pin = parse_code(code)
+        else:
+            self.token, self.pin = token, pin
         self.conn = None
         self.dev = device_id()
 
@@ -178,10 +230,18 @@ class Pixel:
         if r.getheader("Connection", "").lower() == "close":
             self.close()
         if r.status == 401:
-            sys.exit("STOPPED: wrong pairing code. Turn 'Receive from computer' off and on in the Pixel app for a new one.")
+            sys.exit("STOPPED: the Pixel didn't accept the code. Check the code shown in PixelFerry and try again.")
         if r.status == 429:
             sys.exit("STOPPED: too many wrong codes from this computer; the Pixel blocks it for 5 minutes.")
         return r.status, data.decode("utf-8", "replace")
+
+    def pair(self):
+        """After a successful code login: get a key so this computer never needs the code again."""
+        s, d = self.request("POST", "/api/pair")
+        if s == 200:
+            remember_pairing(self.pin, json.loads(d)["token"])
+            return True
+        return False
 
     def status(self):
         s, d = self.request("GET", "/api/status")
@@ -242,8 +302,46 @@ def wait_for_room(px, size):
         time.sleep(POLL_SECONDS)
 
 
+def connect(a):
+    """Address: given, or found automatically. Code: given (then remembered), or a saved pairing."""
+    saved = paired()
+    host, port, pin = a.to, a.port, None
+    if not host:
+        found = discover()
+        mine = [f for f in found if f[2] in saved]
+        pick = (mine or found or [None])[0]
+        if pick is None:
+            sys.exit("Couldn't find the Pixel on this Wi-Fi. In PixelFerry tap 'A computer', check both are on the same Wi-Fi, "
+                     "or pass --to with the address shown on the Pixel.")
+        host, port, pin = pick
+        print(f"Found your Pixel at {host}")
+    if a.code:
+        px = Pixel(host, port, a.code)
+        px.status()  # verifies certificate + code
+        px.pair()
+        return px
+    if pin is None:
+        # address given but no code: try every saved pairing (the TLS pin check picks the right one)
+        for p_, t_ in saved.items():
+            try:
+                px = Pixel(host, port, token=t_, pin=p_)
+                px._connect()
+                return px
+            except SystemExit:
+                continue
+            except OSError:
+                break
+        sys.exit("First time with this Pixel: add --code with the code shown in PixelFerry.")
+    if pin not in saved:
+        sys.exit("First time with this Pixel: add --code with the code shown in PixelFerry.")
+    return Pixel(host, port, token=saved[pin], pin=pin)
+
+
 def cmd_send(a):
-    px = Pixel(a.to, a.port, a.code)
+    st = load_settings()
+    st.update({"owner": a.owner, "device": a.device})
+    save_settings(st)
+    px = connect(a)
     hello = with_retries(px.status, "connect")
     print(f"Connected to Pixel securely. Free space: {fmt_bytes(hello['free'])}")
     files, skipped = collect(a.folders, a.since, a.until)
@@ -326,7 +424,7 @@ def cmd_send(a):
 
 
 def cmd_delete(a):
-    px = Pixel(a.to, a.port, a.code)
+    px = connect(a)
     files, _ = collect(a.folders)
     by_key = {item_key(p, st): (p, st) for p, st in files}
     s, d = with_retries(lambda: px.request("POST", "/api/deletable"), "deletable")
@@ -372,15 +470,100 @@ def day(s):
     return datetime.strptime(s, "%Y-%m-%d").timestamp()
 
 
+SETTINGS = os.path.join(STATE_DIR, "settings.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(d):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(SETTINGS, "w") as f:
+        json.dump(d, f)
+
+
+def ask(prompt, default=None):
+    shown = f"{prompt} [{default}]: " if default else f"{prompt}: "
+    v = input(shown).strip()
+    return v or (default or "")
+
+
+def pick_folder():
+    """A normal folder-picker window if available (Windows / most Linux), else type the path."""
+    try:
+        import tkinter
+        from tkinter import filedialog
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title="Choose the folder with your photos")
+        root.destroy()
+        if path:
+            return path
+    except Exception:
+        pass
+    return ask("Folder with your photos (you can drag it into this window)").strip('"').strip("'")
+
+
+def guided():
+    """Double-click mode: asks a few questions, remembers the answers."""
+    print("=" * 56)
+    print("  PixelFerry: send photos to your Pixel, full quality")
+    print("=" * 56)
+    print("On the Pixel: open PixelFerry > tap 'A computer'. It shows an address and a code.\n")
+    st = load_settings()
+    folder = pick_folder()
+    if not folder or not os.path.isdir(folder):
+        print("No folder chosen. Nothing sent.")
+        return
+    print(f"Folder: {folder}")
+    print("Looking for your Pixel on this Wi-Fi...")
+    found = discover()
+    mine = [f for f in found if f[2] in paired()]
+    extra = []
+    if mine:
+        print(f"Found your Pixel at {mine[0][0]} (already paired, no code needed).")
+    else:
+        if found:
+            print(f"Found a Pixel at {found[0][0]}.")
+        else:
+            extra += ["--to", ask("Couldn't find it automatically. Pixel address (shown in PixelFerry)", st.get("to"))]
+        extra += ["--code", ask("Code shown in PixelFerry (only needed this first time)")]
+    owner = ask("Whose photos are these? (e.g. Shawn)", st.get("owner"))
+    device = ask("Which computer? (e.g. Laptop)", st.get("device") or socket.gethostname()[:20])
+    st.update({"owner": owner, "device": device})
+    if "--to" in extra:
+        st["to"] = extra[extra.index("--to") + 1]
+    save_settings(st)
+    args = ["send", folder, "--owner", owner, "--device", device] + extra
+    try:
+        main(args)
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            print(e.code)
+    print()
+    if ask("Delete the photos Google Photos has already backed up from this folder? (yes/no)", "no").lower() == "yes":
+        try:
+            main(["delete-backed-up", folder] + [x for i, x in enumerate(extra) if extra[i - 1:i] != ["--code"] and x != "--code"])
+        except SystemExit as e:
+            if e.code not in (None, 0):
+                print(e.code)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Send photos/videos to your Pixel at full quality.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("send", "delete-backed-up"):
         p = sub.add_parser(name)
         p.add_argument("folders", nargs="+")
-        p.add_argument("--to", required=True, help="Pixel address shown in the app, e.g. 192.168.1.20")
-        p.add_argument("--port", type=int, default=8443)
-        p.add_argument("--code", required=True, help="pairing code shown in the app")
+        p.add_argument("--to", help="Pixel address (optional: found automatically on the same Wi-Fi)")
+        p.add_argument("--port", type=int, default=int(os.environ.get("PIXELFERRY_PORT", "8443")))
+        p.add_argument("--code", help="code shown in the app (only needed the first time)")
         if name == "send":
             p.add_argument("--owner", required=True, help="whose files, e.g. Shawn")
             p.add_argument("--device", default=socket.gethostname()[:20], help="e.g. Laptop")
@@ -395,4 +578,11 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        try:
+            guided()
+        except KeyboardInterrupt:
+            print("\nStopped. Run it again any time: finished files are skipped.")
+        input("\nPress Enter to close.")
+    else:
+        main()

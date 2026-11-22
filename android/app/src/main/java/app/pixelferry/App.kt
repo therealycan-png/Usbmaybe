@@ -55,7 +55,13 @@ object Hub {
 }
 
 /** Live status shown by the UI. */
+/** What the home screen shows. Set explicitly, never guessed from text. */
+enum class Phase { IDLE, COPYING, WAITING_GOOGLE, FINISHING, DONE, DONE_PENDING_GOOGLE, STOPPED, UNPLUGGED, LOW_BATTERY, DELETING, DELETE_DONE, RECEIVING, ERROR }
+
 class RunState {
+    @Volatile var phase = Phase.IDLE
+    /** Device the last run was from, e.g. "Mom's iPhone13". */
+    @Volatile var deviceLabel = ""
     @Volatile var active = false
     @Volatile var title = "Idle"
     @Volatile var detail = ""

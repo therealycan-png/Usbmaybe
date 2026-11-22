@@ -108,7 +108,7 @@ class PickActivity : Activity() {
             val n = entries.count { it.itemKey in keys && it.itemKey !in done }
             if (n > 0) body.add(card(C.TINT_BLUE).add(h("Pick up where you left off"),
                 p("%,d files from last time are still to go.".format(n)),
-                btn("Resume (%,d left)".format(n), primary = true) { start(entries.filter { it.itemKey in keys }) }))
+                btn("Resume · %,d left".format(n), primary = true) { start(entries.filter { it.itemKey in keys }) }))
         }
 
         // 1. whose
@@ -290,7 +290,12 @@ class PickActivity : Activity() {
     private fun start(sel: List<SourceEntry>) {
         val s = src ?: return
         val o = owner.text.toString().trim(); val l = label.text.toString().trim()
-        if (o.isEmpty() || l.isEmpty()) { owner.error = if (o.isEmpty()) "Needed for the divider" else null; label.error = if (l.isEmpty()) "Needed" else null; return }
+        if (o.isEmpty() || l.isEmpty()) {
+            val f = if (o.isEmpty()) owner else label
+            f.error = if (o.isEmpty()) "Whose photos are these? e.g. Mom" else "Which device? e.g. iPhone13"
+            (body.parent as? ScrollView)?.smoothScrollTo(0, (f.parent as View).top)
+            f.requestFocus(); return
+        }
         if (sel.isEmpty()) { summary.text = "Nothing selected."; return }
         if (checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             needSetup("PixelFerry needs permission to save photos on this Pixel first."); return

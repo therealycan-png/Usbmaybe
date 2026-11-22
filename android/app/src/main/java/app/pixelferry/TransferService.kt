@@ -75,7 +75,10 @@ class TransferService : Service() {
         cancel = false
         val t = Thread({
             try { block() } catch (e: Exception) {
-                Hub.run.title = "Stopped"; Hub.run.detail = "Error: ${e.message}"; Hub.run.errors += e.toString()
+                Hub.run.phase = Phase.ERROR
+                Hub.run.title = "Something went wrong"
+                Hub.run.detail = friendly(e)
+                Hub.run.errors += e.toString()
             } finally {
                 Hub.run.active = false
                 updateNotif(force = true)
@@ -124,23 +127,31 @@ class TransferService : Service() {
     private fun runJob(job: Job) {
         val r = Hub.run
         r.errors.clear()
-        r.active = true; r.title = "Transferring"; r.detail = "From ${job.profile.owner}'s ${job.profile.label}"
+        r.deviceLabel = "${job.profile.owner}'s ${job.profile.label}"
+        r.phase = Phase.COPYING
+        r.active = true; r.title = "Copying from ${r.deviceLabel}"; r.detail = "Getting started…"
         r.done = 0; r.bytesDone = 0; r.duplicates = 0; r.failed = 0; r.skipped = 0; r.startedAt = System.currentTimeMillis()
         val loop = TransferLoop(Hub.engine, Hub.wave, Hub.ledger, cancelled = { cancel }, beforeEach = { batteryGuard() },
             onUpdate = { p ->
                 r.total = p.total; r.bytesTotal = p.bytesTotal; r.done = p.done; r.bytesDone = p.bytesDone
                 r.duplicates = p.duplicates; r.skipped = p.skipped; r.failed = p.failed
-                if (Hub.wave.phase == WaveCoordinator.Phase.RUNNING) { r.title = "Transferring"; r.detail = "Copying ${p.current}" }
+                if (Hub.wave.phase == WaveCoordinator.Phase.RUNNING && r.phase != Phase.LOW_BATTERY) {
+                    r.phase = Phase.COPYING; r.title = "Copying from ${r.deviceLabel}"; r.detail = p.current
+                }
                 p.errors.lastOrNull()?.let { if (it !in r.errors) r.errors += it }
                 updateNotif()
             })
         val end = loop.run(job.profile, job.source, job.entries)
         val p = loop.progress
         when (end) {
-            LoopEnd.CANCELLED -> { r.title = "Stopped"; r.detail = "Tap Start again any time: finished files are skipped."; return }
+            LoopEnd.CANCELLED -> {
+                r.phase = Phase.STOPPED; r.title = "Stopped"
+                r.detail = "Everything copied so far is kept. Open the device again and tap Resume to carry on."; return
+            }
             LoopEnd.UNPLUGGED -> {
-                r.title = "Paused: cable unplugged"
-                r.detail = "Plug it back in, open the device and tap 'Resume last transfer'. Finished files are kept and won't be copied again."
+                r.phase = Phase.UNPLUGGED
+                r.title = "Cable unplugged"
+                r.detail = "Plug ${r.deviceLabel} back in and tap Resume. Nothing is copied twice."
                 Notifs.alert(this, r.title, r.detail); return
             }
             LoopEnd.FINISHED -> {}
@@ -153,15 +164,17 @@ class TransferService : Service() {
     private fun finalWave(summary: String = "", profile: DeviceProfile? = null) {
         val r = Hub.run
         r.active = true
-        r.title = "Finishing: waiting for Google Photos"
-        r.detail = "All files copied. $summary Waiting for Google Photos to back up the last ones, then Free up space."
+        r.phase = Phase.FINISHING
+        r.title = "All copied. Google is backing up the last ones"
+        r.detail = "$summary\nThis usually takes 10–30 minutes on Wi-Fi. Then you can delete them from ${r.deviceLabel.ifEmpty { "the device" }}."
         updateNotif(force = true)
         val ok = Hub.wave.awaitAllBackedUp({ Hub.ledger.countState(ItemState.VERIFIED) }, { cancel })
         val deletable = profile?.let { p ->
             "${Hub.ledger.deletableFor(p.deviceKey).size} files are backed up by Google and can be deleted from ${p.owner}'s ${p.label}."
         } ?: ""
-        r.title = if (ok) "Done" else "Copy done (Google backup still pending)"
-        r.detail = "$summary $deletable"
+        r.phase = if (ok) Phase.DONE else Phase.DONE_PENDING_GOOGLE
+        r.title = if (ok) "All done 🎉" else "Copied. Google is still backing up"
+        r.detail = "$summary\n$deletable"
         Notifs.alert(this, r.title, r.detail)
     }
 
@@ -171,14 +184,15 @@ class TransferService : Service() {
             val level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) * 100 / b.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
             val charging = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
             if (level > 12 || charging) return
+            Hub.run.phase = Phase.LOW_BATTERY
             Hub.run.title = "Paused: Pixel battery low ($level%)"
-            Hub.run.detail = "Charge the Pixel. Continues automatically at 25%."
+            Hub.run.detail = "Charge the Pixel. It continues by itself at 25%."
             updateNotif(force = true)
             while (!cancel) {
                 Thread.sleep(60_000)
                 val b2 = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
                 val l2 = b2.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) * 100 / b2.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
-                if (l2 >= 25 || b2.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0) { Hub.run.title = "Transferring"; return }
+                if (l2 >= 25 || b2.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0) { Hub.run.phase = Phase.COPYING; return }
             }
         }
     }
@@ -187,7 +201,8 @@ class TransferService : Service() {
 
     private fun runDelete(src: MediaSource) {
         val r = Hub.run
-        r.active = true; r.title = "Deleting from ${src.suggestedLabel}"; r.detail = "Reading device…"
+        r.phase = Phase.DELETING
+        r.active = true; r.title = "Deleting from ${src.suggestedLabel}"; r.detail = "Checking the device…"
         if (!src.canDelete) { r.title = "Not deleting"; r.detail = "This device has no serial number, so it can't be safely identified."; return }
         val ok = Hub.ledger.deletableFor(src.deviceKey).associateBy { it.itemKey }
         val entries = src.list { r.detail = "Reading device… $it" }.filter { it.itemKey in ok }
@@ -200,7 +215,8 @@ class TransferService : Service() {
             r.done++; r.bytesDone += e.approxSize
             r.detail = "Deleted ${r.done} of ${r.total}"; updateNotif()
         }
-        r.title = "Delete finished"
+        r.phase = Phase.DELETE_DONE
+        r.title = "Space freed on ${src.suggestedLabel} 🎉"
         r.detail = "Removed ${r.done - r.failed} files from ${src.suggestedLabel}" + if (r.failed > 0) " (${r.failed} could not be removed)." else "."
     }
 
@@ -214,7 +230,9 @@ class TransferService : Service() {
             if (stopRequested) stopReceiver() // switched off while it was starting
         } catch (e: Exception) {
             receiver?.stop(); receiver = null; pairingCode = null
-            Hub.run.title = "Couldn't start receiving"; Hub.run.detail = "${e.message}. Turn the switch off and on, or restart the Pixel."
+        discovery?.stop(); discovery = null
+            Hub.run.phase = Phase.ERROR
+            Hub.run.title = "Couldn't get ready for the computer"; Hub.run.detail = "Check the Pixel is on Wi-Fi, then tap 'A computer' again."
             main.post { syncLocks(); maybeStop() }
         } finally {
             starting = false
@@ -237,20 +255,28 @@ class TransferService : Service() {
             override fun isWaitingForBackup() = Hub.wave.phase == app.pixelferry.core.WaveCoordinator.Phase.WAITING
             override fun statusMessage() = "${Hub.run.title}. ${Hub.run.detail}"
             override fun log(msg: String) { Hub.run.errors += msg }
+        }, trustedTokens = { computerKeys(this) }, onPaired = { k ->
+            val p = getSharedPreferences("pf", 0)
+            p.edit().putStringSet("computerKeys", computerKeys(this) + k).apply()
         })
         srv.start()
         receiver = srv
+        discovery = app.pixelferry.core.Discovery({ srv.localPort }, Pairing.certPin(TlsIdentity.certDer())).also {
+            try { it.start() } catch (_: Exception) { /* the address can still be typed */ }
+        }
         pairingCode = Pairing.code(token, Pairing.certPin(TlsIdentity.certDer()))
         main.post { syncLocks() }
         @Suppress("DEPRECATION")
         wifiLock = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager)
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "pixelferry:recv").apply { acquire() }
-        Hub.run.title = "Receiving from computer"; Hub.run.detail = "Waiting for the computer to connect"; Hub.run.done = 0; Hub.run.bytesDone = 0
+        Hub.run.phase = Phase.RECEIVING
+        Hub.run.title = "Ready for your computer"; Hub.run.detail = "Waiting for the computer to connect"; Hub.run.done = 0; Hub.run.bytesDone = 0
         updateNotif(force = true)
     }
 
     @Synchronized private fun stopReceiver() {
         receiver?.stop(); receiver = null; pairingCode = null
+        discovery?.stop(); discovery = null
         wifiLock?.let { if (it.isHeld) it.release() }; wifiLock = null
         syncLocks()
     }
@@ -266,6 +292,10 @@ class TransferService : Service() {
         @Volatile var pendingJob: Job? = null
         @Volatile var pendingDelete: MediaSource? = null
         @Volatile var receiver: ReceiverServer? = null
+        @Volatile var discovery: app.pixelferry.core.Discovery? = null
+
+        fun computerKeys(ctx: Context): Set<String> = ctx.getSharedPreferences("pf", 0).getStringSet("computerKeys", emptySet())!!.toSet()
+        fun forgetComputers(ctx: Context) = ctx.getSharedPreferences("pf", 0).edit().remove("computerKeys").apply()
         @Volatile var pairingCode: String? = null
 
         fun send(ctx: Context, action: String) {
@@ -277,5 +307,17 @@ class TransferService : Service() {
             b >= 1L shl 20 -> String.format("%.0f MB", b / (1L shl 20).toDouble())
             else -> String.format("%.0f KB", b / 1024.0)
         }
+    }
+}
+
+/** Plain-language version of an error for the screen (details stay in the log). */
+fun friendly(e: Throwable): String {
+    val m = (e.message ?: "").lowercase()
+    return when {
+        "locked" in m || "trust" in m || "file transfer" in m -> e.message!!
+        "unplug" in m || "stopped sending" in m || "disconnect" in m -> "Lost the connection to the device. Plug it in again, unlock it, and tap Resume."
+        "permission" in m || "cannot create" in m -> "PixelFerry can't save on this Pixel. Open Setup and allow it."
+        "space" in m || "full" in m -> "The Pixel is full. Free up space in Google Photos and try again."
+        else -> "Something unexpected happened. Your photos are safe. Tap Resume to try again."
     }
 }

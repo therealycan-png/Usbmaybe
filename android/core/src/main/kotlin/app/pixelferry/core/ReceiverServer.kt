@@ -27,6 +27,9 @@ class ReceiverServer(
     private val listener: Listener = object : Listener {},
     private val port: Int = 8443,
     private val bind: InetAddress? = null,
+    /** Long-lived tokens of computers paired before (so the code is typed only once per computer). */
+    private val trustedTokens: () -> Set<String> = { emptySet() },
+    private val onPaired: (String) -> Unit = {},
 ) {
     interface Listener {
         fun onStored(name: String, size: Long) {}
@@ -135,7 +138,9 @@ class ReceiverServer(
     private fun authed(req: Req): Boolean {
         if (locked(req)) return false
         val h = req.headers["authorization"] ?: ""
-        val ok = h.startsWith("Bearer ") && Pairing.constantTimeEquals(h.removePrefix("Bearer ").trim(), token)
+        val given = h.removePrefix("Bearer ").trim()
+        val ok = h.startsWith("Bearer ") && given.isNotEmpty() &&
+            (Pairing.constantTimeEquals(given, token) || trustedTokens().any { Pairing.constantTimeEquals(given, it) })
         val st = strikes.getOrPut(req.ip) { Strikes() }
         synchronized(st) {
             if (ok) st.count = 0
@@ -159,6 +164,12 @@ class ReceiverServer(
             "PUT" to "/api/upload" -> upload(req, out)
             "POST" to "/api/deletable" -> { deletable(req, out); true }
             "POST" to "/api/mark-deleted" -> { markDeleted(req, out); true }
+            "POST" to "/api/pair" -> {
+                // only reachable after the pinned-certificate check + a valid code: issue a computer key
+                drain(req)
+                val t = Pairing.newLongToken(); onPaired(t)
+                respond(out, 200, """{"token":"$t"}"""); true
+            }
             else -> { drain(req); respond(out, 404, """{"error":"not found"}"""); true }
         }
     }

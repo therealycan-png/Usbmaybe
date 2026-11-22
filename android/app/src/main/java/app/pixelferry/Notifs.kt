@@ -47,12 +47,15 @@ object Notifs : WaveNotifier {
     private fun cleanAlert() = nm(App.instance).cancel(ID_ALERT)
 
     override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {
-        Hub.run.title = "Waiting for Google Photos backup"
-        Hub.run.detail = if (attempt == 0) "Pixel is full. Waiting until Google Photos finishes uploading this wave…"
-        else "Ran Free up space (attempt $attempt). Waiting for room… ${FreeUpController.lastResult}"
+        Hub.run.phase = Phase.WAITING_GOOGLE
+        Hub.run.title = "Pixel is full: waiting for Google"
+        Hub.run.detail = "Google Photos is backing up this batch (usually 10–30 min on Wi-Fi). Then space is freed and copying continues by itself." +
+            if (attempt >= 1) "\nStill waiting? Check that the PixelFerry folder has backup turned on in Google Photos." else ""
     }
 
-    override fun stuck(reason: String) { alert(App.instance, "PixelFerry needs you", reason) }
+    override fun stuck(reason: String) {
+        alert(App.instance, "One setting in Google Photos", "Google Photos isn't backing up the PixelFerry folder yet. Open Google Photos › profile picture › Photos settings › Backup › Back up device folders, and turn on every PixelFerry folder.")
+    }
 
-    override fun resumed() { cleanAlert(); Hub.run.title = "Transferring"; Hub.run.detail = "Room is back. Continuing." }
+    override fun resumed() { cleanAlert(); Hub.run.phase = Phase.COPYING; Hub.run.detail = "Space is back. Continuing." }
 }

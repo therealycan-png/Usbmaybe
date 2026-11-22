@@ -60,6 +60,9 @@ class SetupActivity : Activity() {
         root.addView(text(s.body, 17f, C.INK2).apply { gravity = Gravity.CENTER })
         root.addView(spacer(28))
         root.addView(btn(s.action, primary = true) { s.go(this) })
+        if (s.title.startsWith("Google Photos")) root.addView(btn("Open Google Photos to check") {
+            packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) }
+        })
         if (s.optional) root.addView(link("Skip this (you'll tap once per wave instead)") {
             getSharedPreferences("pf", 0).edit().putBoolean("skip_${s.title}", true).apply(); render()
         })
@@ -99,7 +102,7 @@ class SetupActivity : Activity() {
                 done = { it.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED },
                 go = { it.requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE), 1) }),
             Step("🔔", C.TINT_AMBER, "Know when Google is done",
-                "Lets PixelFerry see Google Photos' \"Backing up\" notification, so it knows when it's safe to continue. It ignores every other app.",
+                "Lets PixelFerry see Google Photos' \"Backing up\" notification, so it knows when it's safe to continue. It ignores every other app.\n\nNext screen: find PixelFerry backup watcher, switch it ON, then press Back.",
                 "Open settings",
                 done = { PhotosWatcher.isEnabled(it) },
                 go = {
@@ -107,7 +110,7 @@ class SetupActivity : Activity() {
                     Toast.makeText(it, "Turn ON \"PixelFerry backup watcher\"", Toast.LENGTH_LONG).show()
                 }),
             Step("✨", C.TINT_VIOLET, "Free up space by itself",
-                "When the Pixel is full, PixelFerry taps Google Photos' own \"Free up space\" for you. Google only removes what it has backed up.",
+                "When the Pixel is full, PixelFerry taps Google Photos' own \"Free up space\" for you. Google only removes what it has backed up.\n\nNext screen: tap PixelFerry free-up helper, switch it ON, then press Back twice.",
                 "Open settings", optional = true,
                 done = { FreeUpService.isEnabled(it) },
                 go = {
