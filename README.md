@@ -108,7 +108,7 @@ Re-run them with `./gradlew :core:test :app:testReleaseUnitTest :app:lintRelease
 
 ```
 android/core     pure Kotlin: ingest/verify engine, ledger, waves, backup tracker, HTTPS receiver (JVM-tested)
-android/app      Android 10 app: MTP/PTP + SAF sources, foreground service, watcher, free-up helper, UI
+android/app      Android 10 app: MTP/PTP + SAF sources, foreground service, manual free-up flow, UI
 desktop/         stdlib-only Python sender
 ```
 
