@@ -26,7 +26,9 @@ const val GOOGLE_MAX_BYTES = 10L * 1024 * 1024 * 1024
 /** Pass as size when the source cannot report it (PTP objects over 4 GB). */
 const val UNKNOWN_SIZE = -1L
 /** Room to reserve for a file of unknown size. */
-const val BIG_FILE_ESTIMATE = 12L * 1024 * 1024 * 1024
+/** Room reserved for a file over 4 GB whose exact size the device can't report (just over the 4 GB limit;
+ *  if the file turns out bigger than the free space it fails cleanly and stays on the device). */
+const val BIG_FILE_ESTIMATE = 5L * 1024 * 1024 * 1024
 
 class NotEnoughSpace(val needed: Long, val free: Long) : IOException("Pixel full: need $needed, free $free")
 class VerifyFailed(msg: String) : IOException(msg)

@@ -159,9 +159,18 @@ class MainActivity : Activity() {
     }
     private val continueBtn by lazy { btn("Continue") { continueAfterFreeUp() } }
     private val nothingToFreeBtn by lazy { link("Google says nothing to free?") { googleWontFree() } }
+    /** Exactly why it's paused: what the next file needs vs what the Pixel has. */
+    private val diag by lazy { text("", 15f, C.INK, bold = true).apply { setPadding(0, dp(8), 0, dp(4)) } }
+    private val skipBtn by lazy { btn("Skip this file") { Hub.wave.skipCurrent(); toast("Skipped. It stays on the device; copying carries on.") } }
+    private val storageBtn by lazy { link("Open Pixel storage (free other space)") {
+        try { startActivity(Intent(android.provider.Settings.ACTION_INTERNAL_STORAGE_SETTINGS)) } catch (_: Exception) { startActivity(Intent(android.provider.Settings.ACTION_SETTINGS)) }
+    } }
+    private var diagAt = 0L
+    private var oursOnPixel = -1 // -1 = still counting
+    private var oursBytes = 0L
     private val runCard by lazy {
         card().add(runChip, runTitle, centered(ring).apply { setPadding(0, dp(12), 0, dp(4)) }, stats,
-            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, freeHelp, freeBtn, continueBtn, nothingToFreeBtn, folderTip, detailsLink, stopBtn)
+            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, diag, freeHelp, freeBtn, continueBtn, nothingToFreeBtn, skipBtn, storageBtn, folderTip, detailsLink, stopBtn)
     }
     /** Google backs up a new device folder only after one switch in Google Photos: ask right away, not hours later. */
     private val folderTip by lazy {
@@ -227,7 +236,24 @@ class MainActivity : Activity() {
                 waiting -> dur(((System.currentTimeMillis() - r.waitStartedAt) / 1000).coerceAtLeast(0)); left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
             freeBtn.visibility = if (waiting) View.VISIBLE else View.GONE
             continueBtn.visibility = if (waiting) View.VISIBLE else View.GONE
-            nothingToFreeBtn.visibility = if (waiting) View.VISIBLE else View.GONE
+            if (waiting && System.currentTimeMillis() - diagAt > 5_000) {
+                diagAt = System.currentTimeMillis()
+                thread { val l = Hub.stillOnPixel(); oursOnPixel = l.size; oursBytes = l.sumOf { it.size } }
+            }
+            val need = Hub.wave.neededBytes + Hub.engine.reserveBytes
+            val free = try { Hub.storage.freeBytes() } catch (_: Exception) { 0L }
+            val googleCanHelp = oursOnPixel != 0
+            diag.text = "Next file needs ${fmt(need)} free (incl. ${fmt(Hub.engine.reserveBytes)} safety margin). The Pixel has ${fmt(free)}.\n" +
+                if (oursOnPixel < 0) "Checking PixelFerry's copies on the Pixel…"
+                else if (googleCanHelp) "PixelFerry copies on the Pixel: %,d (%s): Google can free these.".format(oursOnPixel, fmt(oursBytes))
+                else "PixelFerry copies on the Pixel: 0. Google can't free anything more for this. Skip this file, or free other space on the Pixel (apps, Google Photos trash, downloads)."
+            diag.visibility = if (waiting) View.VISIBLE else View.GONE
+            freeHelp.visibility = if (waiting && googleCanHelp) View.VISIBLE else View.GONE
+            freeBtn.visibility = if (waiting && googleCanHelp) View.VISIBLE else View.GONE
+            continueBtn.visibility = if (waiting && googleCanHelp) View.VISIBLE else View.GONE
+            nothingToFreeBtn.visibility = if (waiting && googleCanHelp) View.VISIBLE else View.GONE
+            skipBtn.visibility = if (waiting) View.VISIBLE else View.GONE
+            storageBtn.visibility = if (waiting) View.VISIBLE else View.GONE
             stopBtn.visibility = if (r.active) View.VISIBLE else View.GONE
         }
         val (level, charging) = battery()
@@ -379,7 +405,19 @@ class MainActivity : Activity() {
             val left = Hub.stillOnPixel()
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
-                if (left.isEmpty()) { toast("No PixelFerry copies are on the Pixel."); return@runOnUiThread }
+                if (left.isEmpty()) {
+                    val free = try { Hub.storage.freeBytes() } catch (_: Exception) { 0L }
+                    AlertDialog.Builder(this@MainActivity).setTitle("Nothing of PixelFerry's is left on the Pixel")
+                        .setMessage("Every copy PixelFerry made has already been cleared, so Google has nothing more to free for it. " +
+                            "The Pixel has ${fmt(free)} free.\n\nIf a transfer is paused, the space is being used by other things on the Pixel " +
+                            "(apps, Google Photos trash, downloads), or the next file is simply too big. Skip that file, or free other space.")
+                        .setPositiveButton(if (Hub.wave.phase == WaveCoordinator.Phase.WAITING) "Skip this file" else "OK") { _, _ ->
+                            if (Hub.wave.phase == WaveCoordinator.Phase.WAITING) Hub.wave.skipCurrent() }
+                        .setNeutralButton("Open Pixel storage") { _, _ ->
+                            try { startActivity(Intent(android.provider.Settings.ACTION_INTERNAL_STORAGE_SETTINGS)) } catch (_: Exception) {} }
+                        .show()
+                    return@runOnUiThread
+                }
                 spotCheck(left)
             }
         }

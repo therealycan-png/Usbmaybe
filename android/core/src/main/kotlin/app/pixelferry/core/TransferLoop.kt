@@ -184,7 +184,13 @@ class TransferLoop(
                 return null
             } catch (ex: NotEnoughSpace) {
                 drain() // let pending files finish so their space is counted properly
-                if (!engine.hasRoomFor(e.approxSize) && !wave.awaitRoom(e.approxSize, cancelled, waveSleepMs)) return if (wave.gaveUp) LoopEnd.STUCK_FULL else LoopEnd.CANCELLED
+                if (!engine.hasRoomFor(e.approxSize) && !wave.awaitRoom(e.approxSize, cancelled, waveSleepMs)) {
+                    if (wave.skipped) {
+                        advance(e) { p -> p.failed++; p.errors += "${e.name}: skipped (didn't fit in the Pixel's free space). It's still on the device." }
+                        return null
+                    }
+                    return if (wave.gaveUp) LoopEnd.STUCK_FULL else LoopEnd.CANCELLED
+                }
             } catch (ex: IOException) {
                 if (!source.isConnected()) return LoopEnd.UNPLUGGED
                 if (++attempt >= 3) { advance(e) { p -> p.failed++; p.errors += "${e.name}: ${ex.message}" }; return null }

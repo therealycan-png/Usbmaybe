@@ -105,4 +105,22 @@ class TransferLoopTest {
         assertTrue(phone.calls < 30, "gave up after a handful, not 2,320 files: ${phone.calls}")
         assertEquals(0, ledger.byState(ItemState.VERIFIED).size)
     }
+
+    @Test fun skip_a_file_that_doesnt_fit_and_carry_on() {
+        val files = mapOf("small1.jpg" to ByteArray(1000) { 1 }, "huge.mov" to ByteArray(90_000) { 2 }, "small2.jpg" to ByteArray(1000) { 3 })
+        val phone = FakePhone(files)
+        val ledger = MemoryLedger()
+        val engine = IngestEngine(FakeStorage(tempDir(), capacity = 60_000), ledger, reserveBytes = 5_000)
+        lateinit var wave: WaveCoordinator
+        wave = WaveCoordinator(engine, BackupTracker(ledger), object : WaveNotifier {
+            override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) { Thread { Thread.sleep(50); wave.skipCurrent() }.start() } // you tap Skip
+            override fun stuck(reason: String) {}
+            override fun resumed() {}
+        })
+        val loop = TransferLoop(engine, wave, ledger, cancelled = { false }, retryDelayMs = 0, waveSleepMs = 10)
+        assertEquals(LoopEnd.FINISHED, loop.run(DeviceProfile("d", "S", "Pad"), phone, phone.entries()))
+        assertEquals(2, loop.progress.stored, "the two that fit were copied")
+        assertEquals(1, loop.progress.failed, "the huge one was skipped, not stuck forever")
+        assertTrue(loop.progress.errors.single().contains("still on the device"))
+    }
 }

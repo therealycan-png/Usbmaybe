@@ -43,8 +43,8 @@ object Notifs : WaveNotifier {
         if (Hub.run.phase != Phase.WAITING_GOOGLE) Hub.run.waitStartedAt = System.currentTimeMillis()
         Hub.run.phase = Phase.WAITING_GOOGLE
         Hub.run.title = "Pixel is full: free up space"
-        Hub.run.detail = "Paused. Nothing is lost. Free up space in Google Photos, then tap Continue."
-        alert(App.instance, "Pixel is full: transfer paused", "Open PixelFerry and tap Free up space. When Google Photos is done, tap Continue.")
+        Hub.run.detail = "Paused because the Pixel is full. Nothing is lost. What to do is shown below."
+        alert(App.instance, "Pixel is full: transfer paused", "Open PixelFerry: it shows what's taking the space and what to do.")
     }
 
     override fun stuck(reason: String) {

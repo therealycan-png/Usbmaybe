@@ -28,6 +28,11 @@ class WaveCoordinator(
     @Volatile var waveNumber = 1; private set
     /** The wait ended without room coming back. */
     @Volatile var gaveUp = false; private set
+    /** You chose "Skip this file": the waiting file is left on the device and the transfer moves on. */
+    @Volatile var skipped = false; private set
+    @Volatile private var skipRequested = false
+
+    fun skipCurrent() { if (phase == Phase.WAITING) skipRequested = true }
     private var waitStarted = 0L
     private var lastReconcile = 0L
 
@@ -35,7 +40,7 @@ class WaveCoordinator(
 
     @Synchronized fun beginWait(bytes: Long) {
         if (phase == Phase.WAITING) { neededBytes = maxOf(neededBytes, bytes); return }
-        phase = Phase.WAITING; neededBytes = bytes; waitStarted = clock(); gaveUp = false
+        phase = Phase.WAITING; neededBytes = bytes; waitStarted = clock(); gaveUp = false; skipped = false; skipRequested = false
         notifier.waiting(bytes, engine.freeBytes(), 0)
     }
 
@@ -62,6 +67,7 @@ class WaveCoordinator(
         synchronized(this) { waiters++ }
         try {
             while (!cancelled()) {
+                if (skipRequested) { skipRequested = false; skipped = true; synchronized(this) { phase = Phase.RUNNING }; notifier.resumed(); return false }
                 if (tick()) return !gaveUp
                 Thread.sleep(sleepMs)
             }
