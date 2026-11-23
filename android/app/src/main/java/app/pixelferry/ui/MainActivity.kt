@@ -158,9 +158,10 @@ class MainActivity : Activity() {
         }
     }
     private val continueBtn by lazy { btn("Continue") { continueAfterFreeUp() } }
+    private val nothingToFreeBtn by lazy { link("Google says nothing to free?") { googleWontFree() } }
     private val runCard by lazy {
         card().add(runChip, runTitle, centered(ring).apply { setPadding(0, dp(12), 0, dp(4)) }, stats,
-            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, freeHelp, freeBtn, continueBtn, folderTip, detailsLink, stopBtn)
+            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, freeHelp, freeBtn, continueBtn, nothingToFreeBtn, folderTip, detailsLink, stopBtn)
     }
     /** Google backs up a new device folder only after one switch in Google Photos: ask right away, not hours later. */
     private val folderTip by lazy {
@@ -226,6 +227,7 @@ class MainActivity : Activity() {
                 waiting -> dur(((System.currentTimeMillis() - r.waitStartedAt) / 1000).coerceAtLeast(0)); left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
             freeBtn.visibility = if (waiting) View.VISIBLE else View.GONE
             continueBtn.visibility = if (waiting) View.VISIBLE else View.GONE
+            nothingToFreeBtn.visibility = if (waiting) View.VISIBLE else View.GONE
             stopBtn.visibility = if (r.active) View.VISIBLE else View.GONE
         }
         val (level, charging) = battery()
@@ -312,7 +314,7 @@ class MainActivity : Activity() {
                 when {
                     gone.isNotEmpty() -> askAboutGone(gone, n)
                     n > 0 -> toast("%,d photos confirmed in Google Photos".format(n))
-                    else -> toast("Nothing has left the Pixel yet. In Google Photos, run Free up space once backup is done.")
+                    else -> googleWontFree()
                 }
                 renderDelete()
             }
@@ -368,6 +370,58 @@ class MainActivity : Activity() {
     else tile("☁️", C.TINT_BLUE, "Make them deletable",
         "%,d copies to confirm. Free them in Google Photos, then you can delete the originals.".format(onPixel)) { makeDeletable() }
 
+    /**
+     * Google Photos says everything is backed up but won't free PixelFerry's copies.
+     * Assess it with a spot check you can see, then override (double confirm).
+     */
+    private fun googleWontFree() {
+        thread {
+            val left = Hub.stillOnPixel()
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                if (left.isEmpty()) { toast("No PixelFerry copies are on the Pixel."); return@runOnUiThread }
+                spotCheck(left)
+            }
+        }
+    }
+
+    private fun spotCheck(left: List<Item>) {
+        val sample = left.shuffled().take(3)
+        val box = vbox(20)
+        box.addView(p("Google Photos won't free %,d PixelFerry copies (%s). Let's check they really are in your Google Photos.\n\nSearch each name below in Google Photos. If all are there, they're backed up.".format(left.size, fmt(left.sumOf { it.size })), 15f))
+        for (it in sample) {
+            val name = java.io.File(it.pixelPath!!).nameWithoutExtension
+            box.addView(text(java.io.File(it.pixelPath!!).name, 14f, C.INK, bold = true).apply { setPadding(0, dp(10), 0, 0); setTextIsSelectable(true) })
+            box.addView(link("Search it in Google Photos") { seeInPhotos(name) })
+        }
+        val tick = android.widget.CheckBox(this).apply {
+            text = "I found all ${sample.size} in Google Photos"; textSize = 15f; setTextColor(C.INK); minHeight = dp(48)
+            buttonTintList = android.content.res.ColorStateList.valueOf(C.PRIMARY)
+        }
+        box.addView(tick)
+        val dlg = AlertDialog.Builder(this).setTitle("Check, then free the Pixel")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Continue") { _, _ ->
+                AlertDialog.Builder(this).setTitle("Remove %,d copies from the Pixel?".format(left.size))
+                    .setMessage("PixelFerry deletes its own copies on this Pixel (%s) and counts them as backed up. Your Google Photos copies are NOT touched.\n\nThe originals stay on your other device until you choose Delete originals there.".format(fmt(left.sumOf { it.size })))
+                    .setNegativeButton("No", null)
+                    .setPositiveButton("Yes, free the Pixel") { _, _ ->
+                        toast("Freeing space…")
+                        thread {
+                            val n = Hub.overrideBackedUp(left)
+                            Hub.tracker.closeWindow()
+                            runOnUiThread { toast("Freed %,d copies. Copying continues if it was paused.".format(n)); renderDelete(); renderHero() }
+                        }
+                    }.show()
+            }.create()
+        dlg.setOnShowListener {
+            val ok = dlg.getButton(AlertDialog.BUTTON_POSITIVE); ok.isEnabled = false
+            tick.setOnCheckedChangeListener { _, c -> ok.isEnabled = c }
+        }
+        dlg.show()
+    }
+
     /** The manual free-up, step by step. */
     private fun makeDeletable() {
         // already freed in Google Photos without the button? deal with those first
@@ -380,15 +434,16 @@ class MainActivity : Activity() {
     private fun makeDeletableSteps() {
         if (Hub.freeUpInProgress(this)) {
             AlertDialog.Builder(this).setTitle("Done in Google Photos?")
-                .setMessage("If you ran Free up space in Google Photos, tap Check. PixelFerry counts the photos Google removed as safely backed up.")
+                .setMessage("If you ran Free up space in Google Photos, tap Check. If Google says there's nothing to free, tap \"Google says nothing to free\".")
                 .setPositiveButton("Check") { _, _ -> continueAfterFreeUp() }
-                .setNeutralButton("Open Google Photos") { _, _ -> GooglePhotos.open(this) }
+                .setNeutralButton("Google says nothing to free") { _, _ -> googleWontFree() }
                 .setNegativeButton("Later", null).show()
             return
         }
         AlertDialog.Builder(this).setTitle("Make them deletable")
             .setMessage(FREE_STEPS)
             .setPositiveButton("Free up space") { _, _ -> freeUpNow() }
+            .setNeutralButton("Google says nothing to free") { _, _ -> googleWontFree() }
             .setNegativeButton("Later", null).show()
     }
 

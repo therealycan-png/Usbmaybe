@@ -84,6 +84,26 @@ object Hub {
         ledger.setStates(items.associate { it.id to app.pixelferry.core.ItemState.BACKED_UP })
     }
 
+    /** Copies still on the Pixel (Google hasn't freed them). */
+    fun stillOnPixel(): List<app.pixelferry.core.Item> =
+        ledger.byState(app.pixelferry.core.ItemState.VERIFIED).filter { it.pixelPath != null && java.io.File(it.pixelPath).exists() }
+
+    /**
+     * Override, after your spot check + double confirm: you checked they're in Google Photos, so PixelFerry
+     * removes its own copies from the Pixel (frees space) and counts them as backed up.
+     * @return how many were removed.
+     */
+    fun overrideBackedUp(items: List<app.pixelferry.core.Item>, progress: (Int) -> Unit = {}): Int {
+        var n = 0
+        val done = HashMap<Long, app.pixelferry.core.ItemState>()
+        for (it in items) {
+            if (storage.removeLocal(it.pixelPath!!)) { done[it.id] = app.pixelferry.core.ItemState.BACKED_UP; n++ }
+            if (n % 100 == 0) { ledger.setStates(done); done.clear(); progress(n) }
+        }
+        ledger.setStates(done)
+        return n
+    }
+
     fun freeUpInProgress(ctx: android.content.Context): Boolean =
         tracker.isWindowOpen() && ctx.getSharedPreferences("pf", 0).getLong("freeUpStarted", 0) > 0
 

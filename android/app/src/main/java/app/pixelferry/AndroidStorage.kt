@@ -46,6 +46,16 @@ class AndroidStorage(private val ctx: Context) : PixelStorage {
         } catch (_: Exception) {}
     }
 
+    /** Remove our own copy from the Pixel (file + gallery entry). Google Photos' cloud copy is not touched. */
+    fun removeLocal(path: String): Boolean {
+        val f = File(path)
+        try {
+            ctx.contentResolver.delete(android.provider.MediaStore.Files.getContentUri("external"),
+                android.provider.MediaStore.MediaColumns.DATA + "=?", arrayOf(f.absolutePath))
+        } catch (_: Exception) {}
+        return !f.exists() || f.delete()
+    }
+
     override fun publish(file: File, mime: String, dateTakenMs: Long) {
         MediaScannerConnection.scanFile(ctx, arrayOf(file.absolutePath), arrayOf(mime), null)
     }
