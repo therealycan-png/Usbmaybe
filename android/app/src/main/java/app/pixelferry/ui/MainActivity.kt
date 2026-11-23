@@ -205,7 +205,8 @@ class MainActivity : Activity() {
             }
             runChip.text = chipText; runChip.setTextColor(fg); runChip.background = rounded(bg, dpf(14f))
             runTitle.text = r.title
-            runDetail.text = r.detail + if (r.failed > 0) "\n⚠ %,d file(s) couldn't be copied and were left on the device.".format(r.failed) else ""
+            val stalled = r.active && r.phase == Phase.COPYING && r.lastByteAt > 0 && System.currentTimeMillis() - r.lastByteAt > 3 * 60_000L
+            runDetail.text = r.detail + (if (stalled) "\n⚠ No data from the device for ${(System.currentTimeMillis() - r.lastByteAt) / 60_000} min. Unlock it, or unplug and plug back in, then tap Resume. Nothing is lost." else "") + if (r.failed > 0) "\n⚠ %,d file(s) couldn't be copied and were left on the device.".format(r.failed) else ""
             detailsLink.visibility = if (r.errors.isNotEmpty()) View.VISIBLE else View.GONE
             freeHelp.visibility = if (waiting) View.VISIBLE else View.GONE
             resumeBtn.visibility = if (!r.active && r.phase in setOf(Phase.UNPLUGGED, Phase.STOPPED, Phase.ERROR) && r.total > r.done) View.VISIBLE else View.GONE

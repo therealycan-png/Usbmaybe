@@ -27,6 +27,8 @@ interface CopySource {
     fun copyTo(entry: SourceEntry, dest: File)
     /** Same, but returns the SHA-256 of the bytes if the source streamed them through our code. */
     fun copyHashed(entry: SourceEntry, dest: File): String? { copyTo(entry, dest); return null }
+    /** Optional: tell the loop how many bytes of the current file have arrived (live progress for big videos). */
+    fun onBytes(listener: ((Long) -> Unit)?) {}
 }
 
 class Progress {
@@ -41,6 +43,10 @@ class Progress {
     @Volatile var current = ""
     /** Bytes actually copied in this run (for speed/ETA: excludes files skipped as already sent). */
     @Volatile var copiedBytes = 0L
+    /** Live: bytes of the file arriving right now, its size, and when data last arrived. */
+    @Volatile var fileBytes = 0L
+    @Volatile var fileSize = 0L
+    @Volatile var lastByteAt = System.currentTimeMillis()
     val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
 }
 
@@ -144,6 +150,11 @@ class TransferLoop(
         engine.cleanTemp()
         // one query up front instead of one per file on the cable thread
         done = ledger.forDevice(profile.deviceKey).filter { ledger.isDone(it) }.mapTo(HashSet()) { it.itemKey }
+        var lastUpdate = 0L
+        source.onBytes { n ->
+            p.fileBytes = n; p.lastByteAt = System.currentTimeMillis()
+            if (p.lastByteAt - lastUpdate > 500) { lastUpdate = p.lastByteAt; onUpdate(p) }
+        }
         val v = verifier().also { verifierThread = it }
         try {
             var work: List<Pair<SourceEntry, Int>> = entries.map { it to 0 }
@@ -161,6 +172,7 @@ class TransferLoop(
             // anything never verified is released (its temp file deleted); it's simply sent next time
             generateSequence { queue.poll() }.forEach { if (it is Job.Work) engine.abandon(it.pending) }
             engine.discardPrepared()
+            source.onBytes(null)
         }
     }
 
@@ -176,9 +188,11 @@ class TransferLoop(
         while (true) {
             if (cancelled()) return LoopEnd.CANCELLED
             try {
-                progress.current = e.name; onUpdate(progress)
+                progress.current = e.name; progress.fileBytes = 0; progress.fileSize = e.approxSize
+                progress.lastByteAt = System.currentTimeMillis(); onUpdate(progress)
                 val pending = engine.receive(profile, e.itemKey, e.name, e.size, e.dateMs, checkDone = false, prepareAhead = true) { source.copyHashed(e, it) }
                 if (pending == null) { advance(e) { it.skipped++ }; return null }
+                progress.fileBytes = 0 // counted in bytesDone once verified
                 if (!source.isConnected()) { engine.abandon(pending); return LoopEnd.UNPLUGGED } // may be cut short
                 hand(Job.Work(pending, e, attempt))
                 return null

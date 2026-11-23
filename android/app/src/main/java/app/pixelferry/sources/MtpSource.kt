@@ -114,6 +114,9 @@ class MtpSource private constructor(
 
     override fun copyTo(entry: SourceEntry, dest: File) { copyHashed(entry, dest) }
 
+    @Volatile private var byteListener: ((Long) -> Unit)? = null
+    override fun onBytes(listener: ((Long) -> Unit)?) { byteListener = listener }
+
     /** Which partial-read call this device answers (decided on the first file, then reused). */
     private enum class ReadMode { UNKNOWN, P64, P32, IMPORT }
     @Volatile private var mode = ReadMode.UNKNOWN
@@ -157,6 +160,7 @@ class MtpSource private constructor(
                 if (n < 0) return null // first read: no supported mode
                 if (n == 0L) break
                 o.write(buf, 0, n.toInt()); md.update(buf, 0, n.toInt()); off += n
+                byteListener?.invoke(off)
                 if (size < 0 && n < want) break
                 if (buf.size != chunk) buf = ByteArray(chunk)
             }

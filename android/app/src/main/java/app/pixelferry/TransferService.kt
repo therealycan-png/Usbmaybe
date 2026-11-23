@@ -148,10 +148,11 @@ class TransferService : Service() {
         r.done = 0; r.bytesDone = 0; r.duplicates = 0; r.failed = 0; r.skipped = 0; r.startedAt = System.currentTimeMillis()
         val loop = TransferLoop(Hub.engine, Hub.wave, Hub.ledger, cancelled = { cancel }, beforeEach = { batteryGuard() },
             onUpdate = { p ->
-                r.total = p.total; r.bytesTotal = p.bytesTotal; r.done = p.done; r.bytesDone = p.bytesDone; r.bytesCopied = p.copiedBytes
+                r.total = p.total; r.bytesTotal = p.bytesTotal; r.done = p.done; r.bytesDone = p.bytesDone + p.fileBytes; r.bytesCopied = p.copiedBytes + p.fileBytes; r.lastByteAt = p.lastByteAt
                 r.duplicates = p.duplicates; r.skipped = p.skipped; r.failed = p.failed
                 if (Hub.wave.phase == WaveCoordinator.Phase.RUNNING && r.phase != Phase.LOW_BATTERY) {
-                    r.phase = Phase.COPYING; r.title = "Copying from ${r.deviceLabel}"; r.detail = p.current
+                    r.phase = Phase.COPYING; r.title = "Copying from ${r.deviceLabel}"
+                    r.detail = if (p.fileSize > 50L * 1024 * 1024) "${p.current} · ${fmt(p.fileBytes)} of ${fmt(p.fileSize)}" else p.current
                 }
                 p.errors.lastOrNull()?.let { if (it !in r.errors) r.errors += it }
                 updateNotif()

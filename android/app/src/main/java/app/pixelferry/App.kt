@@ -149,5 +149,7 @@ class RunState {
     @Volatile var startedAt = 0L
     /** Bytes actually copied (not skipped) in this run: drives speed and time left. */
     @Volatile var bytesCopied = 0L
+    /** When data last arrived from the device (to spot a real stall). */
+    @Volatile var lastByteAt = 0L
     val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
 }
