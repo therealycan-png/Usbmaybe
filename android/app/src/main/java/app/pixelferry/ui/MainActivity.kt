@@ -306,11 +306,40 @@ class MainActivity : Activity() {
     private fun continueAfterFreeUp() {
         thread {
             val n = Hub.finishFreeUp(this)
+            val gone = Hub.unclaimedGone()
             runOnUiThread {
-                toast(if (n > 0) "%,d photos confirmed in Google Photos".format(n) else "Nothing was freed yet. Is Google Photos done backing up?")
+                if (isDestroyed) return@runOnUiThread
+                when {
+                    gone.isNotEmpty() -> askAboutGone(gone, n)
+                    n > 0 -> toast("%,d photos confirmed in Google Photos".format(n))
+                    else -> toast("Nothing has left the Pixel yet. In Google Photos, run Free up space once backup is done.")
+                }
                 renderDelete()
             }
         }
+    }
+
+    /**
+     * Copies left the Pixel while PixelFerry wasn't watching (you freed space in Google Photos first).
+     * You decide: count them as backed up (double confirm), or keep them as "send again" (always safe).
+     */
+    private fun askAboutGone(gone: List<app.pixelferry.core.Item>, confirmed: Int) {
+        val n = gone.size
+        AlertDialog.Builder(this)
+            .setTitle("%,d copies left the Pixel".format(n))
+            .setMessage((if (confirmed > 0) "%,d were confirmed automatically.\n\n".format(confirmed) else "") +
+                "%,d more disappeared from the Pixel while PixelFerry wasn't watching.\n\n".format(n) +
+                "Did Google Photos' Free up space remove them (after it finished backing up)?\n\n" +
+                "If you're not sure, choose Re-send. They're copied again next time; Google skips exact duplicates, so nothing is wasted in your account.")
+            .setNegativeButton("Re-send later", null)
+            .setPositiveButton("Yes, Google freed them") { _, _ ->
+                AlertDialog.Builder(this).setTitle("Last check")
+                    .setMessage("Count these %,d as safely in Google Photos? Then they can be deleted from the phone they came from.\n\nOnly say yes if Google Photos' own Free up space removed them, not you or another app.".format(n))
+                    .setNegativeButton("No", null)
+                    .setPositiveButton("Yes") { _, _ ->
+                        thread { Hub.claimFreedByGoogle(gone); runOnUiThread { toast("%,d photos confirmed".format(n)); renderDelete() } }
+                    }.show()
+            }.show()
     }
 
     // ---------------- sources ----------------
@@ -337,10 +366,18 @@ class MainActivity : Activity() {
     private fun makeDeletableTile(onPixel: Int) = if (Hub.freeUpInProgress(this))
         tile("✅", C.TINT_GREEN, "Done in Google Photos? Tap to check", "PixelFerry counts what Google freed", highlight = true) { continueAfterFreeUp() }
     else tile("☁️", C.TINT_BLUE, "Make them deletable",
-        "%,d copies are on the Pixel. Free them in Google Photos, then you can delete the originals.".format(onPixel)) { makeDeletable() }
+        "%,d copies to confirm. Free them in Google Photos, then you can delete the originals.".format(onPixel)) { makeDeletable() }
 
     /** The manual free-up, step by step. */
     private fun makeDeletable() {
+        // already freed in Google Photos without the button? deal with those first
+        thread {
+            val gone = Hub.unclaimedGone()
+            runOnUiThread { if (!isDestroyed) { if (gone.isNotEmpty()) askAboutGone(gone, 0) else makeDeletableSteps() } }
+        }
+    }
+
+    private fun makeDeletableSteps() {
         if (Hub.freeUpInProgress(this)) {
             AlertDialog.Builder(this).setTitle("Done in Google Photos?")
                 .setMessage("If you ran Free up space in Google Photos, tap Check. PixelFerry counts the photos Google removed as safely backed up.")
@@ -458,7 +495,7 @@ class MainActivity : Activity() {
             }
             thread {
                 // remind which devices have backed-up photos waiting to be deleted
-                val waitingGoogle = Hub.ledger.countState(ItemState.VERIFIED)
+                val waitingGoogle = Hub.ledger.countState(ItemState.VERIFIED) + Hub.ledger.countState(ItemState.MISSING_UNKNOWN)
                 val list = (Hub.ledger.devices()).mapNotNull { d ->
                     val n = Hub.ledger.deletableFor(d.deviceKey).size
                     if (n > 0 && !d.deviceKey.startsWith("pc:")) "${d.owner}'s ${d.label}" to n else null
@@ -477,7 +514,7 @@ class MainActivity : Activity() {
             val prof = Hub.ledger.device(src.deviceKey)
             val label = prof?.let { "${it.owner}'s ${it.label}" } ?: src.suggestedLabel
             val items = Hub.ledger.deletableFor(src.deviceKey)
-            val waiting = Hub.ledger.forDevice(src.deviceKey).count { it.state == ItemState.VERIFIED }
+            val waiting = Hub.ledger.forDevice(src.deviceKey).count { it.state == ItemState.VERIFIED || it.state == ItemState.MISSING_UNKNOWN }
             runOnUiThread { if (!isDestroyed) showDelete(label, items, waiting) }
         }
     }

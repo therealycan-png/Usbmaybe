@@ -73,6 +73,17 @@ object Hub {
         return r.backedUp
     }
 
+    /** Copies that left the Pixel without the Free up space button (e.g. you freed space in Google Photos first). */
+    fun unclaimedGone(): List<app.pixelferry.core.Item> {
+        tracker.reconcile() // anything newly gone is classified first
+        return ledger.byState(app.pixelferry.core.ItemState.MISSING_UNKNOWN).filter { it.pixelPath != null && !java.io.File(it.pixelPath).exists() }
+    }
+
+    /** You confirmed (twice) that Google Photos' own Free up space removed them: count them as backed up. */
+    fun claimFreedByGoogle(items: List<app.pixelferry.core.Item>) {
+        ledger.setStates(items.associate { it.id to app.pixelferry.core.ItemState.BACKED_UP })
+    }
+
     fun freeUpInProgress(ctx: android.content.Context): Boolean =
         tracker.isWindowOpen() && ctx.getSharedPreferences("pf", 0).getLong("freeUpStarted", 0) > 0
 
