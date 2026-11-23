@@ -15,6 +15,14 @@ class App : Application() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH_RUN, "Transfer progress", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel(CH_ALERT, "Needs you", NotificationManager.IMPORTANCE_HIGH))
+        // a device pulled out while PixelFerry is idle must not stay "connected" in the app
+        registerReceiver(object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: android.content.Context, i: android.content.Intent) {
+                @Suppress("DEPRECATION") val d = i.getParcelableExtra<android.hardware.usb.UsbDevice>(android.hardware.usb.UsbManager.EXTRA_DEVICE) ?: return
+                val s = Hub.source
+                if (s is app.pixelferry.sources.MtpSource && s.isDevice(d)) { s.close(); if (!Hub.run.active) Hub.source = null }
+            }
+        }, android.content.IntentFilter(android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED))
     }
 
     companion object {
@@ -80,5 +88,7 @@ class RunState {
     @Volatile var failed = 0
     @Volatile var skipped = 0
     @Volatile var startedAt = 0L
+    /** Bytes actually copied (not skipped) in this run: drives speed and time left. */
+    @Volatile var bytesCopied = 0L
     val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
 }

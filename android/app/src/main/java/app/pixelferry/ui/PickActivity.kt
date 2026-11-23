@@ -89,6 +89,8 @@ class PickActivity : Activity() {
 
     private fun build() {
         val s = src ?: return
+        val autoFlag = getSharedPreferences("pf", 0).getLong("autoResumeAt", 0)
+        getSharedPreferences("pf", 0).edit().remove("autoResumeAt").remove("autoResume").apply() // never lingers
         body.removeAllViews()
         val prof = Hub.ledger.device(s.deviceKey)
         val prefs = getSharedPreferences("pf", 0)
@@ -107,8 +109,9 @@ class PickActivity : Activity() {
         resumeSelection()?.let { keys ->
             val n = entries.count { it.itemKey in keys && it.itemKey !in done }
             val prefs2 = getSharedPreferences("pf", 0)
-            val auto = intent.getBooleanExtra(EXTRA_AUTO_RESUME, false) || prefs2.getBoolean("autoResume", false)
-            prefs2.edit().remove("autoResume").apply()
+            // "Resume" tapped just now, or within the last 3 hours before plugging the device back in
+            val auto = intent.getBooleanExtra(EXTRA_AUTO_RESUME, false) ||
+                System.currentTimeMillis() - autoFlag < 3 * 3600_000L
             if (n > 0 && auto && Hub.ledger.device(s.deviceKey) != null) {
                 // came from "Resume": carry on straight away with the same names as before
                 body.post { start(entries.filter { it.itemKey in keys }) }

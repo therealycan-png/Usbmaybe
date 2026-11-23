@@ -11,6 +11,7 @@ import app.pixelferry.ui.MainActivity
 object Notifs : WaveNotifier {
     const val ID_RUN = 1
     private const val ID_ALERT = 2
+    private const val ID_STUCK = 3 // separate, so "tap Free up space" reminders never hide it
 
     private fun nm(ctx: Context) = ctx.getSystemService(NotificationManager::class.java)
 
@@ -48,6 +49,7 @@ object Notifs : WaveNotifier {
     private fun cleanAlert() = nm(App.instance).cancel(ID_ALERT)
 
     override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {
+        if (Hub.wave.inFinal) return // the final step keeps its own summary text
         if (Hub.run.phase != Phase.WAITING_GOOGLE) Hub.run.waitStartedAt = System.currentTimeMillis()
         Hub.run.phase = Phase.WAITING_GOOGLE
         Hub.run.title = "Pixel is full: waiting for Google"
@@ -55,8 +57,15 @@ object Notifs : WaveNotifier {
     }
 
     override fun stuck(reason: String) {
-        alert(App.instance, "One setting in Google Photos", "Google Photos isn't backing up the PixelFerry folder yet. Open Google Photos › profile picture › Photos settings › Backup › Back up device folders, and turn on every PixelFerry folder.")
+        val ctx = App.instance
+        ctx.getSystemService(NotificationManager::class.java).notify(ID_STUCK, Notification.Builder(ctx, App.CH_ALERT)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("One setting in Google Photos")
+            .setStyle(Notification.BigTextStyle().bigText("Google Photos isn't backing up the PixelFerry folder yet. Open Google Photos › profile picture › Photos settings › Backup › Back up device folders, and turn on every PixelFerry folder."))
+            .setContentText("Turn on backup for the PixelFerry folder")
+            .setOnlyAlertOnce(true).setAutoCancel(true).setContentIntent(openApp(ctx)).build())
     }
+
 
     override fun resumed() { cleanAlert(); Hub.run.phase = Phase.COPYING; Hub.run.detail = "Space is back. Continuing." }
 }

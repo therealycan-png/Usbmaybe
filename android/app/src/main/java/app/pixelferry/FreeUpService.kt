@@ -31,8 +31,9 @@ class FreeUpService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.packageName?.toString() != PhotosWatcher.PHOTOS) return
-        // Manual mode: you press Google's own confirm button; we only watch for that click.
-        if (watchManual && event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+        // Whenever you press Google's own confirm button yourself (any time), open the window so what Google
+        // frees is credited as backed up (instead of being re-sent later).
+        if (!armed && event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
             val t = event.text?.joinToString(" ")?.trim() ?: event.contentDescription?.toString()?.trim()
             if (t != null && CONFIRM.matches(t)) {
                 watchManual = false
@@ -103,8 +104,9 @@ class FreeUpService : AccessibilityService() {
         armed = false
         main.removeCallbacksAndMessages(null)
         FreeUpController.onAutoResult(this, ok, why)
-        // come back to PixelFerry
-        startActivity(Intent(this, app.pixelferry.ui.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        // come back to PixelFerry only if you're still in Google Photos (never pull you out of another app)
+        if (rootInActiveWindow?.packageName?.toString() == PhotosWatcher.PHOTOS)
+            startActivity(Intent(this, app.pixelferry.ui.MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     fun arm() {

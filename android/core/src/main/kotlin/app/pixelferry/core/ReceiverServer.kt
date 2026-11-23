@@ -37,6 +37,8 @@ class ReceiverServer(
         fun statusMessage(): String = "ready"
         fun isWaitingForBackup(): Boolean = false
         fun log(msg: String) {}
+        /** A computer talked to us (authenticated): keeps the receiver from switching itself off. */
+        fun onActivity() {}
     }
 
     private var server: ServerSocket? = null
@@ -158,6 +160,7 @@ class ReceiverServer(
             respond(out, if (locked(req)) 429 else 401, """{"error":"bad pairing code"}""", keep = false)
             return false
         }
+        listener.onActivity()
         return when (req.method to req.path) {
             "GET" to "/api/status" -> { drain(req); respond(out, 200, statusJson()); true }
             "POST" to "/api/check" -> { check(req, out); true }

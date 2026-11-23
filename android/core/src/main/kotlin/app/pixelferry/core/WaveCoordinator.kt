@@ -45,6 +45,14 @@ class WaveCoordinator(
     val finalMaxFruitless: Int = 3,
     /** Room wait: after this many fruitless attempts, stop opening Google Photos by itself (notify instead). */
     val autoMaxFruitless: Int = 2,
+    /** Room wait: give up (clear "stuck" state) after this many fruitless attempts. */
+    val roomMaxFruitless: Int = 5,
+    /** Final wave never runs longer than this, whatever Google Photos' notifications say. */
+    val finalMaxMs: Long = 3 * 3600_000L,
+    /** Room wait never runs longer than this. */
+    val roomMaxMs: Long = 12 * 3600_000L,
+    /** "Busy" with nothing leaving the Pixel for this long counts as a fruitless attempt (stuck upload). */
+    val stalledMs: Long = 60 * 60_000L,
     /** Wait at least this long after the wave's last file so Photos notices it. */
     val settleMs: Long = 3 * 60_000L,
     private val autoTap: () -> Boolean = { true },
@@ -63,8 +71,14 @@ class WaveCoordinator(
     /** Attempts in a row after which nothing left the Pixel. */
     @Volatile var fruitless = 0; private set
     private var onPixelAtAttempt = -1
-    /** Final wave gave up: Google hasn't freed the rest (yet). */
+    /** Gave up: Google hasn't freed space/the rest (yet). */
     @Volatile var gaveUp = false; private set
+    private var lastProgressAt = 0L
+    private var lastOnPixel = -1
+    /** True while the final (after-last-file) wave is running. */
+    val inFinal: Boolean get() = isFinal && phase == Phase.WAITING
+    /** Auto-opening Google Photos is still allowed for this wait. */
+    val autoAllowed: Boolean get() = fruitless < autoMaxFruitless
 
     fun fileStored() { lastFileAt = clock() }
 
@@ -86,7 +100,10 @@ class WaveCoordinator(
         phase = Phase.WAITING; neededBytes = bytes; goal = done; isFinal = false
         waitStarted = clock(); attempts = 0; lastAttempt = 0; stuckReported = false
         fruitless = 0; onPixelAtAttempt = -1; gaveUp = false
+        lastProgressAt = clock(); lastOnPixel = -1
     }
+
+    private fun giveUp(): Boolean { gaveUp = true; phase = Phase.RUNNING; return true }
 
     private fun delayFor(attempt: Int): Long = when (attempt) {
         0, 1 -> retryMs
@@ -103,11 +120,23 @@ class WaveCoordinator(
             phase = Phase.RUNNING; waveNumber++; notifier.resumed(); return true
         }
         val now = clock()
+        // hard limits: never wait (and hold the phone awake) forever
+        if (now - waitStarted > (if (isFinal) finalMaxMs else roomMaxMs)) return giveUp()
+        if (rec.stillOnPixel >= 0 && rec.stillOnPixel != lastOnPixel) {
+            if (lastOnPixel >= 0 && rec.stillOnPixel < lastOnPixel) lastProgressAt = now
+            lastOnPixel = rec.stillOnPixel
+        }
+        // Final wave: nothing leaves the Pixel for an hour (e.g. a stuck "waiting for Wi-Fi" upload) = fruitless.
+        // (Not for the room wait: a big batch can legitimately upload for hours; roomMaxMs bounds that.)
+        if (isFinal && now - lastProgressAt > stalledMs) { fruitless++; lastProgressAt = now }
+        if (isFinal && fruitless >= finalMaxFruitless) return giveUp()
+        if (!isFinal && fruitless >= roomMaxFruitless) return giveUp()
         // judge the previous attempt once it has had time to work
         if (onPixelAtAttempt >= 0 && rec.stillOnPixel >= 0 && now - lastAttempt >= minOf(retryMs, 5 * 60_000L)) {
             if (rec.stillOnPixel < onPixelAtAttempt) fruitless = 0 else fruitless++
             onPixelAtAttempt = -1
-            if (isFinal && fruitless >= finalMaxFruitless) { gaveUp = true; phase = Phase.RUNNING; return true }
+            if (isFinal && fruitless >= finalMaxFruitless) return giveUp()
+            if (!isFinal && fruitless >= roomMaxFruitless) return giveUp()
         }
         if (now - lastFileAt < settleMs) return false
         val busy = signals.backingUp()
@@ -133,10 +162,10 @@ class WaveCoordinator(
         return false
     }
 
-    /** Blocking wait used by the USB job. @return true if room came back (false = cancelled). */
+    /** Blocking wait used by the USB job. @return true if room came back (false = cancelled or gave up: check [gaveUp]). */
     fun awaitRoom(bytes: Long, cancelled: () -> Boolean, sleepMs: Long = 20_000): Boolean {
         beginWait(bytes)
-        return loop(cancelled, sleepMs)
+        return loop(cancelled, sleepMs) && !gaveUp
     }
 
     fun awaitAllBackedUp(remainingOnPixel: () -> Int, cancelled: () -> Boolean, sleepMs: Long = 20_000): Boolean {

@@ -59,15 +59,27 @@ class TransferService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_RUN -> pendingJob?.let { job -> pendingJob = null; launch { runJob(job) } }
-            ACTION_DELETE -> pendingDelete?.let { src -> pendingDelete = null; launch { runDelete(src) } }
+            ACTION_RUN, ACTION_DELETE -> runPendingOrInterruptFinish()
             ACTION_FINISH -> launch { finalWave() }
             ACTION_STOP -> { cancel = true }
-            ACTION_RECV_ON -> { starting = true; stopRequested = false; Thread { startReceiver() }.start() }
+            ACTION_RECV_ON -> { starting = true; stopRequested = false; lastComputerActivity = System.currentTimeMillis(); Thread { startReceiver() }.start() }
             ACTION_RECV_OFF -> { stopRequested = true; stopReceiver() }
         }
         main.post { maybeStop() }
         return START_NOT_STICKY
+    }
+
+    /**
+     * A new transfer or a confirmed delete always gets done: if only the "waiting for Google" final step is
+     * running, it is interrupted (it can be redone with Finish now); the request runs as soon as it stops.
+     */
+    private fun runPendingOrInterruptFinish() {
+        if (worker?.isAlive == true) {
+            if (Hub.run.phase == Phase.FINISHING && (pendingJob != null || pendingDelete != null)) cancel = true
+            return // picked up again when the worker ends
+        }
+        pendingDelete?.let { src -> pendingDelete = null; launch { runDelete(src) }; return }
+        pendingJob?.let { job -> pendingJob = null; launch { runJob(job) } }
     }
 
     private fun launch(block: () -> Unit) {
@@ -82,7 +94,7 @@ class TransferService : Service() {
             } finally {
                 Hub.run.active = false
                 updateNotif(force = true)
-                main.post { worker = null; syncLocks(); maybeStop() }
+                main.post { worker = null; runPendingOrInterruptFinish(); syncLocks(); maybeStop() }
             }
         }, "pf-job")
         worker = t
@@ -138,7 +150,7 @@ class TransferService : Service() {
         r.done = 0; r.bytesDone = 0; r.duplicates = 0; r.failed = 0; r.skipped = 0; r.startedAt = System.currentTimeMillis()
         val loop = TransferLoop(Hub.engine, Hub.wave, Hub.ledger, cancelled = { cancel }, beforeEach = { batteryGuard() },
             onUpdate = { p ->
-                r.total = p.total; r.bytesTotal = p.bytesTotal; r.done = p.done; r.bytesDone = p.bytesDone
+                r.total = p.total; r.bytesTotal = p.bytesTotal; r.done = p.done; r.bytesDone = p.bytesDone; r.bytesCopied = p.copiedBytes
                 r.duplicates = p.duplicates; r.skipped = p.skipped; r.failed = p.failed
                 if (Hub.wave.phase == WaveCoordinator.Phase.RUNNING && r.phase != Phase.LOW_BATTERY) {
                     r.phase = Phase.COPYING; r.title = "Copying from ${r.deviceLabel}"; r.detail = p.current
@@ -165,7 +177,16 @@ class TransferService : Service() {
                 r.detail = "Nothing was lost or deleted. Tap Show details and send that to whoever is helping you."
                 Notifs.alert(this, r.title, r.detail); return
             }
-            LoopEnd.FINISHED -> {}
+            LoopEnd.STUCK_FULL -> {
+                r.phase = Phase.ERROR
+                r.title = "Paused: Google isn't freeing space"
+                r.detail = "The Pixel is full and Google Photos hasn't made room for hours. In Google Photos › profile picture › Photos settings › Backup, check backup is on and the PixelFerry folder is turned on, keep Wi-Fi on, then tap Resume."
+                Notifs.stuck(""); return
+            }
+            LoopEnd.FINISHED -> {
+                // everything picked was handled: no "Unfinished" card for this device any more
+                java.io.File(filesDir, app.pixelferry.ui.PickActivity.selectionName(job.profile.deviceKey)).delete()
+            }
         }
         val summary = listOfNotNull("%,d copied".format(p.stored),
             if (p.skipped > 0) "%,d already sent before".format(p.skipped) else null,
@@ -179,6 +200,7 @@ class TransferService : Service() {
         val r = Hub.run
         r.active = true
         r.phase = Phase.FINISHING
+        r.waitStartedAt = System.currentTimeMillis()
         r.title = "All copied. Google is backing up the last ones"
         r.detail = "$summary\nThis usually takes 10–30 minutes on Wi-Fi. Then you can delete them from ${r.deviceLabel.ifEmpty { "the device" }}."
         updateNotif(force = true)
@@ -202,10 +224,11 @@ class TransferService : Service() {
             if (level > 15 || charging) return
             Hub.run.phase = Phase.LOW_BATTERY
             Hub.run.title = "Paused: Pixel battery low ($level%)"
-            Hub.run.detail = "Charge the Pixel (see the battery tips on screen). It continues by itself once it's charging or back at 30%."
+            Hub.run.detail = "Unplug the other device and charge the Pixel. It continues by itself once it's charging or back at 30%."
             updateNotif(force = true)
+            Notifs.alert(this, "Pixel battery low: transfer paused", "Unplug the other device and charge the Pixel. Nothing is lost; it continues by itself.")
             while (!cancel) {
-                Thread.sleep(60_000)
+                Thread.sleep(5_000)
                 val b2 = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
                 val l2 = b2.getIntExtra(BatteryManager.EXTRA_LEVEL, 100) * 100 / b2.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
                 if (l2 >= 30 || b2.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0) { Hub.run.phase = Phase.COPYING; return }
@@ -240,6 +263,7 @@ class TransferService : Service() {
     // ---------------- Wi-Fi receiver for computers ----------------
 
     private var waveThread: Thread? = null
+    @Volatile private var lastComputerActivity = 0L
     private var multicastLock: WifiManager.MulticastLock? = null
 
     private fun startReceiver() {
@@ -275,6 +299,7 @@ class TransferService : Service() {
             override fun isWaitingForBackup() = Hub.wave.phase == app.pixelferry.core.WaveCoordinator.Phase.WAITING
             override fun statusMessage() = "${Hub.run.title}. ${Hub.run.detail}"
             override fun log(msg: String) { Hub.run.errors += msg }
+            override fun onActivity() { lastComputerActivity = System.currentTimeMillis() }
         }, trustedTokens = { computerKeys(this) }, onPaired = { k -> addComputerKey(this, k) })
         srv.start()
         receiver = srv
@@ -290,7 +315,18 @@ class TransferService : Service() {
         wifiLock = (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager)
             .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "pixelferry:recv").apply { acquire() }
         Hub.run.phase = Phase.RECEIVING
-        Hub.run.title = "Ready for your computer"; Hub.run.detail = "Waiting for the computer to connect"; Hub.run.done = 0; Hub.run.bytesDone = 0
+        Hub.run.title = "Ready for your computer"; Hub.run.detail = "Waiting for the computer to connect"
+        Hub.run.done = 0; Hub.run.bytesDone = 0; Hub.run.total = 0; Hub.run.bytesTotal = 0; Hub.run.bytesCopied = 0
+        lastComputerActivity = System.currentTimeMillis()
+        // switch off by itself after 15 idle minutes (Wi-Fi lock + discovery drain the battery)
+        Thread {
+            while (receiver != null) {
+                try { Thread.sleep(60_000) } catch (_: InterruptedException) { break }
+                if (receiver != null && System.currentTimeMillis() - lastComputerActivity > 15 * 60_000L && Hub.wave.phase != app.pixelferry.core.WaveCoordinator.Phase.WAITING) {
+                    main.post { stopReceiver(); maybeStop() }; break
+                }
+            }
+        }.apply { isDaemon = true; start() }
         updateNotif(force = true)
     }
 

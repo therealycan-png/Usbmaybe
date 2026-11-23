@@ -221,6 +221,46 @@ class NoNaggingTest {
     }
 }
 
+class LimitsTest {
+    private val mom = DeviceProfile("d", "Mom", "iPhone")
+    private fun setup(busy: Boolean, capacity: Long = Long.MAX_VALUE / 4): Triple<IngestEngine, MemoryLedger, (Long) -> WaveCoordinator> {
+        val ledger = MemoryLedger(); val eng = IngestEngine(FakeStorage(tempDir(), capacity), ledger, reserveBytes = 0)
+        eng.ingest(mom, "a", "a.jpg", 10, 0, null) { it.writeBytes(ByteArray(10)) }
+        return Triple(eng, ledger) { t0 ->
+            var t = t0
+            WaveCoordinator(eng, BackupTracker(ledger),
+                object : BackupSignals { override fun backingUp() = busy; override fun lastActivityMs() = 0L },
+                object : FreeUpAction { override fun requestFreeUp(auto: Boolean) = true },
+                object : WaveNotifier { override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {}
+                    override fun stuck(reason: String) {}; override fun resumed() {} }, { clockNow }, settleMs = 0)
+        }
+    }
+    private var clockNow = 0L
+
+    @Test fun final_wave_ends_even_if_photos_says_busy_forever() {
+        val (_, ledger, mk) = setup(busy = true)
+        val wave = mk(0)
+        wave.beginFinal { ledger.byState(ItemState.VERIFIED).size }
+        var ended = false
+        for (i in 0 until 1000) { clockNow += 60_000; if (wave.tick()) { ended = true; break } }
+        assertTrue(ended && wave.gaveUp, "a stuck 'backing up' notification can't keep it running")
+        assertTrue(clockNow <= 3 * 3600_000L + 60_000, "within the 3 h cap: ${clockNow / 60_000} min")
+    }
+
+    @Test fun pixel_full_wait_gives_up_instead_of_nagging_for_days() {
+        val (eng, _, mk) = setup(busy = false, capacity = 20)
+        val wave = mk(0)
+        var room = true
+        val t = Thread { room = wave.awaitRoom(100, { false }, sleepMs = 0) }
+        // drive the clock from here
+        t.start()
+        while (t.isAlive) { clockNow += 60_000; Thread.sleep(1) }
+        assertFalse(room); assertTrue(wave.gaveUp)
+        assertTrue(clockNow <= 12 * 3600_000L + 5 * 60_000, "bounded: ${clockNow / 3600_000} h")
+        assertNotNull(eng)
+    }
+}
+
 class SafetyRegressionTest {
     private val mom = DeviceProfile("dev-iphone", "Mom", "iPhone 13")
 

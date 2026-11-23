@@ -52,6 +52,14 @@ class BackupTracker(
     }
 
     @Synchronized fun openFreeUpWindow() {
+        // already open (e.g. the helper's own click is also seen as a click): just extend, keep the snapshot
+        if (isWindowOpen()) {
+            // already open (e.g. the helper's own click is also seen as a click): credit what Google freed so far,
+            // add files that arrived since, extend. Never re-baseline (that would lose what was already freed).
+            reconcileLocked(windowOpen = true)
+            snapshot = snapshot + ledger.byState(ItemState.VERIFIED).filter { it.pixelPath != null && exists(it.pixelPath) }.map { it.id }
+            windowOpenUntil = clock() + windowMs; onWindowChanged(windowOpenUntil); return
+        }
         reconcileLocked(windowOpen = false) // anything already gone is NOT Google's doing
         snapshot = ledger.byState(ItemState.VERIFIED).filter { it.pixelPath != null && exists(it.pixelPath) }.map { it.id }.toSet()
         freeAtOpen = freeBytes?.invoke() ?: 0; storedSinceOpen = 0; acceptedBytes = 0; openedAt = System.nanoTime()

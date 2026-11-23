@@ -143,7 +143,7 @@ class MainActivity : Activity() {
         if (src != null && src.isConnected()) startActivity(Intent(this, PickActivity::class.java).putExtra(PickActivity.EXTRA_AUTO_RESUME, true))
         else AlertDialog.Builder(this).setTitle("Plug it back in")
             .setMessage("Plug ${Hub.run.deviceLabel.ifEmpty { "the device" }} back into the Pixel and unlock it. PixelFerry opens it and continues where it stopped. Nothing is copied twice.")
-            .setPositiveButton("OK") { _, _ -> getSharedPreferences("pf", 0).edit().putBoolean("autoResume", true).apply() }.show()
+            .setPositiveButton("OK") { _, _ -> getSharedPreferences("pf", 0).edit().putLong("autoResumeAt", System.currentTimeMillis()).apply() }.show()
     }
 
     /** Opens a Google Photos search for the file tag (e.g. Mom_iPhone13). */
@@ -212,8 +212,7 @@ class MainActivity : Activity() {
             ring.fraction = frac
             ring.center = "${(frac * 100).toInt()}%"
             ring.caption = if (r.active) "${fmt(r.bytesDone)} of ${fmt(r.bytesTotal)}" else ""
-            val el = (System.currentTimeMillis() - r.startedAt).coerceAtLeast(1)
-            val speed = if (r.startedAt > 0) r.bytesDone * 1000 / el else 0
+            val speed = speedNow(r)
             val left = if (speed > 0 && r.active && !waiting) (r.bytesTotal - r.bytesDone) / speed else -1
             setStat("files", "%,d".format(r.done))
             (stats.findViewWithTag<android.widget.TextView>("files")?.parent as? LinearLayout)?.getChildAt(1)
@@ -235,11 +234,15 @@ class MainActivity : Activity() {
         // Battery saver: during a run the screen is dimmed, and only kept on while the battery can afford it
         // (keeping it on lets the helper tap Google's "Free up space"; otherwise you get a notification instead).
         val (level, charging) = battery()
-        val lp = window.attributes
-        val wantDim = if (r.active) 0.05f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-        if (lp.screenBrightness != wantDim) { lp.screenBrightness = wantDim; window.attributes = lp }
-        if (r.active && (charging || level >= 30)) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Keep the screen on only when it helps: waiting for Google with the helper on and still allowed to tap.
+        val waitingNow = r.active && (r.phase == Phase.WAITING_GOOGLE || r.phase == Phase.FINISHING)
+        val helperUseful = waitingNow && FreeUpService.instance != null && Hub.wave.autoAllowed && (charging || level >= 30)
+        if (helperUseful) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Dim only after 30 s without a touch, and only while kept on (any touch brightens it again).
+        val lp = window.attributes
+        val wantDim = if (helperUseful && System.currentTimeMillis() - lastTouch > 30_000) 0.05f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        if (lp.screenBrightness != wantDim) { lp.screenBrightness = wantDim; window.attributes = lp }
         batteryCard.visibility = if (r.active && !charging && Hub.source is MtpSource) View.VISIBLE else View.GONE
         batteryText.text = "Pixel battery $level% and dropping: the Pixel is powering the other device through the cable."
         if (!r.active && runCard.tag != "idle") { runCard.tag = "idle"; renderDelete() }
@@ -249,10 +252,30 @@ class MainActivity : Activity() {
 
     private fun dur(sec: Long) = when { sec < 60 -> "<1 min"; sec < 3600 -> "${sec / 60} min"; else -> "${sec / 3600} h ${sec % 3600 / 60} m" }
 
+    private var lastTouch = System.currentTimeMillis()
+    override fun onUserInteraction() { super.onUserInteraction(); lastTouch = System.currentTimeMillis() }
+
+    /** Copy speed over the last minute of actual copying (skipped files and waiting don't distort it). */
+    private val samples = ArrayDeque<Pair<Long, Long>>()
+    private fun speedNow(r: app.pixelferry.RunState): Long {
+        val now = System.currentTimeMillis()
+        if (!r.active || r.phase != Phase.COPYING) { samples.clear(); return 0 }
+        if (samples.isNotEmpty() && r.bytesCopied < samples.last().second) samples.clear() // new run
+        samples.addLast(now to r.bytesCopied)
+        while (samples.size > 2 && now - samples.first().first > 60_000) samples.removeFirst()
+        val (t0, b0) = samples.first()
+        return if (now - t0 >= 3_000) (r.bytesCopied - b0) * 1000 / (now - t0) else 0
+    }
+
+    private var batteryCache = 100 to true
+    private var batteryAt = 0L
     private fun battery(): Pair<Int, Boolean> {
+        if (System.currentTimeMillis() - batteryAt < 30_000) return batteryCache
+        batteryAt = System.currentTimeMillis()
         val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return 100 to true
         val level = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, 100) * 100 / b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
-        return level to (b.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0)
+        batteryCache = level to (b.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, 0) != 0)
+        return batteryCache
     }
 
     private val batteryText by lazy { text("", 15f, C.INK) }
@@ -416,12 +439,13 @@ class MainActivity : Activity() {
                     resumeBox.removeAllViews()
                     for ((label, left) in unfinished) resumeBox.addView(tile("⏯️", C.TINT_BLUE, "Unfinished: $label",
                         "%,d left. Plug it in and unlock it to continue. Nothing is copied twice.".format(left), highlight = true) {
-                        getSharedPreferences("pf", 0).edit().putBoolean("autoResume", true).apply(); cableHelp()
+                        getSharedPreferences("pf", 0).edit().putLong("autoResumeAt", System.currentTimeMillis()).apply(); cableHelp()
                     })
                 }
             }
             thread {
                 // remind which devices have backed-up photos waiting to be deleted
+                val waitingGoogle = Hub.ledger.countState(ItemState.VERIFIED)
                 val list = (Hub.ledger.devices()).mapNotNull { d ->
                     val n = Hub.ledger.deletableFor(d.deviceKey).size
                     if (n > 0 && !d.deviceKey.startsWith("pc:")) "${d.owner}'s ${d.label}" to n else null
@@ -429,6 +453,9 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (isDestroyed) return@runOnUiThread
                     deleteBox.removeAllViews()
+                    if (waitingGoogle > 0 && !Hub.run.active) deleteBox.addView(tile("☁️", C.TINT_BLUE, "Finish now",
+                        "%,d on the Pixel are waiting for Google. Tap to check and free them.".format(waitingGoogle)) {
+                        TransferService.send(this, TransferService.ACTION_FINISH) })
                     for ((label, n) in list) deleteBox.addView(tile("🧹", C.TINT_GREEN, "Delete originals from $label",
                         "%,d are safe in Google Photos. Plug it in to delete them there.".format(n)) { cableHelp() })
                 }
@@ -459,7 +486,10 @@ class MainActivity : Activity() {
         if (Hub.source?.canDelete == false) {
             c.addView(p("This device has no serial number, so PixelFerry won't delete from it. Delete them on the device itself.", 15f, C.WARN))
         } else if (items.isNotEmpty()) {
-            c.addView(btn("Delete originals from $label", primary = true, color = C.DANGER) { confirmDelete(label, items.size, items.sumOf { it.size }) })
+            c.addView(btn("Delete originals from $label", primary = true, color = C.DANGER) {
+                if (Hub.run.active && Hub.run.phase != Phase.FINISHING) toast("Wait until the current transfer finishes, then delete.")
+                else confirmDelete(label, items.size, items.sumOf { it.size })
+            })
         }
         if (waiting > 0 && !Hub.run.active) c.addView(link("Finish now: get the last %,d confirmed".format(waiting)) {
             TransferService.send(this, TransferService.ACTION_FINISH)
@@ -522,7 +552,7 @@ class MainActivity : Activity() {
             AlertDialog.Builder(this).setTitle("Tips")
                 .setMessage("☁ Leaving iCloud\nTurn on \"Download and Keep Originals\" on the iPhone, transfer, delete, repeat until iCloud is empty.\n\n" +
                     "🔎 Finding photos\nEvery file is named like Mom_iPhone13_IMG_1234. In Google Photos, open a photo › ⓘ to see its name, or search the name.\n\n" +
-                    "🔋 Battery\nThe other phone draws power from the Pixel. PixelFerry pauses at 12% and continues at 25%.\n\n" +
+                    "🔋 Battery\nThe other phone draws power from the Pixel. PixelFerry pauses at 15% and continues when it's charging or back at 30%.\n\n" +
                     "🎥 Insta360\nRaw files arrive as NAME_insv.mp4 / NAME_insp.jpg, bytes untouched. Rename back to edit in Insta360 Studio.\n\n" +
                     "🛟 Safety\nNothing is deleted anywhere until Google Photos has it, and you confirm twice.")
                 .setPositiveButton("OK", null).show()

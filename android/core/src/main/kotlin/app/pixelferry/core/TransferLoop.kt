@@ -39,10 +39,12 @@ class Progress {
     @Volatile var skipped = 0
     @Volatile var failed = 0
     @Volatile var current = ""
+    /** Bytes actually copied in this run (for speed/ETA: excludes files skipped as already sent). */
+    @Volatile var copiedBytes = 0L
     val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
 }
 
-enum class LoopEnd { FINISHED, CANCELLED, UNPLUGGED, ALL_FAILING }
+enum class LoopEnd { FINISHED, CANCELLED, UNPLUGGED, ALL_FAILING, STUCK_FULL }
 
 /**
  * Copies a selection oldest-first, as a two-stage pipeline so the cable never waits for the disk:
@@ -97,8 +99,8 @@ class TransferLoop(
                         val r = engine.commit(j.pending, null)
                         wave.fileStored()
                         outcome = { p -> when (r) {
-                            is IngestResult.Stored -> p.stored++
-                            is IngestResult.Duplicate -> p.duplicates++
+                            is IngestResult.Stored -> { p.stored++; p.copiedBytes += e.approxSize }
+                            is IngestResult.Duplicate -> { p.duplicates++; p.copiedBytes += e.approxSize }
                             is IngestResult.AlreadyHave -> p.skipped++
                         } }
                     } catch (ex: TooBigForGoogle) {
@@ -182,7 +184,7 @@ class TransferLoop(
                 return null
             } catch (ex: NotEnoughSpace) {
                 drain() // let pending files finish so their space is counted properly
-                if (!engine.hasRoomFor(e.approxSize) && !wave.awaitRoom(e.approxSize, cancelled, waveSleepMs)) return LoopEnd.CANCELLED
+                if (!engine.hasRoomFor(e.approxSize) && !wave.awaitRoom(e.approxSize, cancelled, waveSleepMs)) return if (wave.gaveUp) LoopEnd.STUCK_FULL else LoopEnd.CANCELLED
             } catch (ex: IOException) {
                 if (!source.isConnected()) return LoopEnd.UNPLUGGED
                 if (++attempt >= 3) { advance(e) { p -> p.failed++; p.errors += "${e.name}: ${ex.message}" }; return null }
