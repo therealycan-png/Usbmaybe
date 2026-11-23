@@ -192,6 +192,35 @@ class Mp4CheckTest {
     }
 }
 
+class NoNaggingTest {
+    private val mom = DeviceProfile("dev-iphone", "Mom", "iPhone 13")
+
+    /** Google never frees the last file (e.g. not backed up): PixelFerry must stop opening Google Photos. */
+    @Test fun final_wave_gives_up_and_stops_auto_opening_photos() {
+        var t = 0L; val ledger = MemoryLedger(); val root = tempDir()
+        val eng = IngestEngine(FakeStorage(root), ledger, reserveBytes = 0)
+        eng.ingest(mom, "a", "a.jpg", 10, 0, null) { it.writeBytes(ByteArray(10)) }
+        val calls = mutableListOf<Boolean>()
+        val wave = WaveCoordinator(eng, BackupTracker(ledger, { t }),
+            object : BackupSignals { override fun backingUp() = false; override fun lastActivityMs() = 0L },
+            object : FreeUpAction { override fun requestFreeUp(auto: Boolean): Boolean { calls += auto; return auto } },
+            object : WaveNotifier {
+                override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {}
+                override fun stuck(reason: String) {}
+                override fun resumed() {}
+            }, { t }, settleMs = 0)
+        wave.beginFinal { ledger.byState(ItemState.VERIFIED).size }
+        var done = false
+        for (i in 0 until 400) { t += 60_000; if (wave.tick()) { done = true; break } }   // ~6.6 hours of ticks
+        assertTrue(done, "final wave ends by itself")
+        assertTrue(wave.gaveUp, "reports that Google didn't free the rest")
+        assertTrue(calls.size <= 4, "a handful of tries, not one every 12 minutes forever: ${calls.size}")
+        assertEquals(listOf(true, true), calls.take(2))
+        assertTrue(calls.drop(2).all { !it }, "after 2 fruitless tries it only notifies, never auto-opens: $calls")
+        assertTrue(t < 4 * 3600_000L, "gives up within a few hours")
+    }
+}
+
 class SafetyRegressionTest {
     private val mom = DeviceProfile("dev-iphone", "Mom", "iPhone 13")
 

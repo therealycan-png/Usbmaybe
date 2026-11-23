@@ -119,7 +119,7 @@ class FreeUpService : AccessibilityService() {
         @Volatile var armed = false
         /** Set when you chose "Free up now" yourself: the window opens when we see you press Google's confirm. */
         @Volatile var watchManual = false
-        private val CONFIRM = Regex("(?i)^free up([\\s\\u00A0]+[0-9.,]+[\\s\\u00A0]*(kb|mb|gb|tb))?$")
+        private val CONFIRM = Regex("(?i)^free up([\\s\\u00A0]+[0-9.,]+[\\s\\u00A0]*(kb|mb|gb|tb|items?|photos?|videos?))?$")
         private val MENU = listOf("free up space", "free up device storage", "free up storage")
         private val ACCOUNT = listOf("account", "profile")
         private val NOTHING = listOf("nothing to free", "no items to free", "already been removed")
@@ -140,7 +140,8 @@ object FreeUpController : FreeUpAction {
         val pm = ctx.getSystemService(PowerManager::class.java)
         val km = ctx.getSystemService(KeyguardManager::class.java)
         val svc = FreeUpService.instance
-        val canAuto = auto && svc != null && pm.isInteractive && !km.isKeyguardLocked
+        // Never pull you into Google Photos while you're doing something else: only when PixelFerry is open.
+        val canAuto = auto && svc != null && Hub.uiVisible && pm.isInteractive && !km.isKeyguardLocked
         if (!canAuto) {
             Notifs.askFreeUp(ctx)
             return false

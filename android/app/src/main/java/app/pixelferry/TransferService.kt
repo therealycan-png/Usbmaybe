@@ -182,13 +182,15 @@ class TransferService : Service() {
         r.title = "All copied. Google is backing up the last ones"
         r.detail = "$summary\nThis usually takes 10–30 minutes on Wi-Fi. Then you can delete them from ${r.deviceLabel.ifEmpty { "the device" }}."
         updateNotif(force = true)
-        val ok = Hub.wave.awaitAllBackedUp({ Hub.ledger.countState(ItemState.VERIFIED) }, { cancel })
+        val ok = Hub.wave.awaitAllBackedUp({ Hub.ledger.countState(ItemState.VERIFIED) }, { cancel }) && !Hub.wave.gaveUp
+        val left = Hub.ledger.countState(ItemState.VERIFIED)
         val deletable = profile?.let { p ->
             "${Hub.ledger.deletableFor(p.deviceKey).size} files are backed up by Google and can be deleted from ${p.owner}'s ${p.label}."
         } ?: ""
         r.phase = if (ok) Phase.DONE else Phase.DONE_PENDING_GOOGLE
         r.title = if (ok) "All done 🎉" else "Copied. Google is still backing up"
-        r.detail = "$summary\n$deletable"
+        r.detail = "$summary\n$deletable" + if (!ok && left > 0)
+            "\n%,d are still waiting for Google. PixelFerry stopped checking so it won't keep opening Google Photos. Tap \"Finish now\" later.".format(left) else ""
         Notifs.alert(this, r.title, r.detail)
     }
 

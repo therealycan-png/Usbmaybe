@@ -31,6 +31,7 @@ object Notifs : WaveNotifier {
             .setSmallIcon(android.R.drawable.stat_notify_error)
             .setContentTitle(title).setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text))
+            .setOnlyAlertOnce(true) // updating the same alert never buzzes again
             .setAutoCancel(true).setContentIntent(intent).build())
     }
 

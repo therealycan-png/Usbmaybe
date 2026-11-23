@@ -83,8 +83,8 @@ class MainActivity : Activity() {
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIntent(intent) }
     override fun onDestroy() { unregisterReceiver(permReceiver); unregisterReceiver(attachReceiver); super.onDestroy() }
-    override fun onResume() { super.onResume(); renderAll(); tick() }
-    override fun onPause() { ui.removeCallbacksAndMessages(null); super.onPause() }
+    override fun onResume() { super.onResume(); Hub.uiVisible = true; renderAll(); tick() }
+    override fun onPause() { Hub.uiVisible = false; ui.removeCallbacksAndMessages(null); super.onPause() }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 

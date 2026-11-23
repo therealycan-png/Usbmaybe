@@ -43,6 +43,9 @@ object Hub {
     /** The source the user currently has open (USB device or folder). */
     @Volatile var source: MediaSource? = null
 
+    /** PixelFerry is on screen right now (only then may the helper open Google Photos by itself). */
+    @Volatile var uiVisible = false
+
     val run = RunState()
 
     /** Check for freed files every 15 s while a free-up window is open, even when no wave is waiting. */
