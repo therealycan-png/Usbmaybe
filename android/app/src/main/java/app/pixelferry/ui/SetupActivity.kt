@@ -14,8 +14,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Toast
-import app.pixelferry.FreeUpService
-import app.pixelferry.PhotosWatcher
+import app.pixelferry.GooglePhotos
 
 /**
  * First-run setup: one step per screen, one big button, moves on by itself
@@ -61,7 +60,7 @@ class SetupActivity : Activity() {
         root.addView(spacer(28))
         root.addView(btn(s.action, primary = true) { s.go(this) })
         if (s.title.startsWith("Google Photos")) root.addView(btn("Open Google Photos to check") {
-            packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) }
+            GooglePhotos.open(this)
         })
         if (s.optional) root.addView(link("Skip this (you'll tap once per wave instead)") {
             getSharedPreferences("pf", 0).edit().putBoolean("skip_${s.title}", true).apply(); render()
@@ -119,16 +118,6 @@ class SetupActivity : Activity() {
                         it.requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE), 1)
                     }
                 }),
-            Step("🔔", C.TINT_AMBER, "Know when Google is done",
-                "Lets PixelFerry see Google Photos' \"Backing up\" notification, so it knows when it's safe to continue. It ignores every other app.\n\nNext screen: find PixelFerry backup watcher, switch it ON, then press Back.",
-                "Open settings",
-                done = { PhotosWatcher.isEnabled(it) },
-                go = { it.open(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS), "Turn ON \"PixelFerry backup watcher\"") }),
-            Step("✨", C.TINT_VIOLET, "Free up space by itself",
-                "When the Pixel is full, PixelFerry taps Google Photos' own \"Free up space\" for you. Google only removes what it has backed up.\n\nNext screen: tap PixelFerry free-up helper, switch it ON, then press Back twice.",
-                "Open settings", optional = true,
-                done = { FreeUpService.isEnabled(it) },
-                go = { it.open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS), "Tap \"PixelFerry free-up helper\" and turn it ON") }),
             Step("🔋", C.TINT_GREEN, "Keep going with the screen off",
                 "Big transfers can take hours. This stops Android from pausing PixelFerry.",
                 "Allow",

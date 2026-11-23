@@ -23,7 +23,7 @@ class ManifestTest {
             Regex("^class (\\w+)\\s*(?:\\(|:)[^\\n]*\\b(Activity|Service|AccessibilityService|NotificationListenerService)\\(\\)", RegexOption.MULTILINE)
                 .findAll(f.readText()).map { "$pkg.${it.groupValues[1]}" to it.groupValues[2] }
         }.toList()
-        assertTrue(classes.size >= 6, "found $classes")
+        assertTrue(classes.size >= 4, "found $classes")
         for ((cls, kind) in classes) {
             val cn = ComponentName("app.pixelferry", cls)
             try {

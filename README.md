@@ -3,7 +3,7 @@
 Move photos and videos from any phone, tablet, camera or computer onto an **original Google Pixel XL**, so Google Photos backs them up with the Pixel's free unlimited Original-quality storage. Then, once Google has them, delete them from the device they came from.
 
 - **Full quality.** Files are copied byte for byte. Nothing is converted or compressed, and video and audio are never re-encoded.
-- **No batch limit.** 10,000+ files in one run. When the Pixel fills up, PixelFerry waits for Google Photos to back up, frees the space, and carries on by itself.
+- **No batch limit.** 10,000+ files in one run. When the Pixel fills up, the transfer pauses. Free up space in Google Photos with PixelFerry's **Free up space** button, tap **Continue**, and it carries on.
 - **Delete from the source only when it's safe.** A file is offered for deletion only after Google Photos itself has removed it from the Pixel with *Free up space*, which Google does only for items it has backed up. Every delete asks you twice.
 - **Tells you whose phone it came from.** Files are tagged like `Mom_iPhone13_IMG_1234.HEIC`. Search `Mom_iPhone13` in Google Photos to see everything from that phone.
 
@@ -22,8 +22,6 @@ Move photos and videos from any phone, tablet, camera or computer onto an **orig
 2. Open the downloaded file. If Android asks, allow "Install unknown apps" for your browser or Files app.
 3. Open **PixelFerry** and go through the **Setup checklist**:
    - **Save photos to the Pixel**: Allow.
-   - **See when Google Photos is backing up**: turn on *PixelFerry backup watcher*.
-   - **Auto-tap "Free up space"** (optional, but means zero taps per wave): Accessibility > *PixelFerry free-up helper* > On. It only works inside Google Photos, and only while a wave is waiting.
    - **Keep running with the screen off**: Allow.
    - **Google Photos backup quality is Original**: check it, then confirm.
 4. In **Google Photos** on the Pixel: Backup **On**, quality **Original**.
@@ -37,8 +35,8 @@ Move photos and videos from any phone, tablet, camera or computer onto an **orig
 2. Tap **Open …** in PixelFerry and type whose it is (e.g. *Mom*) and which device (e.g. *iPhone13*).
 3. Choose **Everything**, **By date range**, **By folder / album**, or **Pick photos myself**, then tap **Start transfer**.
 4. After the first transfer from a new device, Google Photos asks whether to back up the new folder (or go to Google Photos > Backup > Back up device folders). Turn the **PixelFerry/Owner_Device** folder **On**. This happens once per device.
-5. Leave it running. You can leave PixelFerry open on screen (it keeps the screen on so the helper can tap) or turn the screen off (then you get one notification per wave to tap *Free up space*).
-6. When it says **Done**, the card **Delete from …** shows how many files are confirmed backed up. Tap it, then confirm twice.
+5. Leave it running. The screen can be off. If the Pixel fills up, you get one notification: tap **Free up space** in PixelFerry, run Free up space in Google Photos when its backup is done, come back, and tap **Continue**.
+6. When it says **All copied**, tap **Make them deletable**. It walks you through Google Photos' Free up space. Then the **Delete originals from …** card shows what's confirmed, and you confirm twice.
 
 **Unplugged by accident?** Plug back in, open the device, and tap **Resume last transfer**. Finished files are never copied twice.
 
@@ -83,7 +81,6 @@ If you have a Windows PC, *iCloud for Windows* can download everything at once, 
 - **Videos over 10 GB:** Google Photos can't back these up, so PixelFerry warns you and leaves them on the device.
 - **iPhone videos over 4 GB over the cable:** iPhones report sizes in 32 bits, so these are checked by video structure instead of size. If one can't be copied completely, it is marked failed and kept on the iPhone. Send those through a computer.
 - **Insta360 raw files** arrive as `NAME_insv.mp4` / `NAME_insp.jpg` so Google Photos backs them up. The bytes are untouched; rename them back to `.insv` / `.insp` to edit in Insta360 Studio. `.lrv` preview files are skipped.
-- **Google Photos changes:** the auto-tap helper looks for Google's "Free up space" button. If a Google Photos update moves it, you get a notification to tap it yourself, and nothing unsafe happens.
 - **Don't delete files from `DCIM/PixelFerry` by hand** while a transfer is running. If a copy disappears without Google freeing it, PixelFerry keeps the source file and sends it again next time.
 
 ## 6. How good is it? (measured, not guessed)
@@ -100,10 +97,10 @@ Re-run them with `./gradlew :core:test :app:testReleaseUnitTest :app:lintRelease
 ## 7. How it keeps your stuff safe
 
 - **Verification:** every file is written, forced to flash (fsync), then read back and hashed (SHA-256). The size must match exactly. From a computer, the hash must match the computer's own hash. Bad copies are retried, and nothing unverified is ever recorded.
-- **Deletion gate:** a source file is deletable only if its Pixel copy disappeared during a short window that opens at the moment Google's *Free up space* is confirmed, and the copy was on the Pixel when that window opened. Copies that vanish any other way are re-sent, and the source is kept. Every delete is confirmed twice, and USB deletes double-check the file name and size on the device first.
+- **Deletion gate:** a source file is deletable only if its Pixel copy disappeared while you were freeing space through PixelFerry's **Free up space** button, the Pixel's free space really went up by that much, and the copy was on the Pixel when you started. Copies that vanish any other way are re-sent, and the source is kept. Every delete is confirmed twice, and USB deletes double-check the file name and size on the device first.
 - **Duplicates:** identical files (same SHA-256) from any device are stored once.
 - **Wi-Fi security:** TLS with the Pixel's key kept in Android Keystore. The computer pins 80 bits of the Pixel's certificate fingerprint before sending anything, pairs once with the code, then uses its own 160-bit key. Wrong codes lock that address out for 5 minutes. A device pretending to be your Pixel is refused. Discovery replies carry no secrets.
-- **Permissions:** the notification watcher reads only Google Photos' notifications. The accessibility helper acts only inside Google Photos and only while a wave is waiting. PixelFerry has no internet servers and no accounts.
+- **Permissions:** storage, USB and Wi-Fi only. No notification or accessibility access, nothing runs in the background, and PixelFerry never opens Google Photos by itself. No servers, no accounts.
 
 ---
 

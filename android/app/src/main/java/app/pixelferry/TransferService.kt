@@ -60,7 +60,6 @@ class TransferService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_RUN, ACTION_DELETE -> runPendingOrInterruptFinish()
-            ACTION_FINISH -> launch { finalWave() }
             ACTION_STOP -> { cancel = true }
             ACTION_RECV_ON -> { starting = true; stopRequested = false; lastComputerActivity = System.currentTimeMillis(); Thread { startReceiver() }.start() }
             ACTION_RECV_OFF -> { stopRequested = true; stopReceiver() }
@@ -75,7 +74,6 @@ class TransferService : Service() {
      */
     private fun runPendingOrInterruptFinish() {
         if (worker?.isAlive == true) {
-            if (Hub.run.phase == Phase.FINISHING && (pendingJob != null || pendingDelete != null)) cancel = true
             return // picked up again when the worker ends
         }
         pendingDelete?.let { src -> pendingDelete = null; launch { runDelete(src) }; return }
@@ -192,28 +190,10 @@ class TransferService : Service() {
             if (p.skipped > 0) "%,d already sent before".format(p.skipped) else null,
             if (p.duplicates > 0) "%,d exact copies skipped".format(p.duplicates) else null,
             if (p.failed > 0) "%,d left on the device".format(p.failed) else null).joinToString(" · ")
-        finalWave(summary, job.profile)
-    }
-
-    /** Make sure the last files are confirmed by Google so they become deletable at the source. */
-    private fun finalWave(summary: String = "", profile: DeviceProfile? = null) {
-        val r = Hub.run
-        r.active = true
-        r.phase = Phase.FINISHING
-        r.waitStartedAt = System.currentTimeMillis()
-        r.title = "All copied. Google is backing up the last ones"
-        r.detail = "$summary\nThis usually takes 10–30 minutes on Wi-Fi. Then you can delete them from ${r.deviceLabel.ifEmpty { "the device" }}."
-        updateNotif(force = true)
-        val ok = Hub.wave.awaitAllBackedUp({ Hub.ledger.countState(ItemState.VERIFIED) }, { cancel }) && !Hub.wave.gaveUp
-        val left = Hub.ledger.countState(ItemState.VERIFIED)
-        val deletable = profile?.let { p ->
-            "${Hub.ledger.deletableFor(p.deviceKey).size} files are backed up by Google and can be deleted from ${p.owner}'s ${p.label}."
-        } ?: ""
-        r.phase = if (ok) Phase.DONE else Phase.DONE_PENDING_GOOGLE
-        r.title = if (ok) "All done 🎉" else "Copied. Google is still backing up"
-        r.detail = "$summary\n$deletable" + if (!ok && left > 0)
-            "\n%,d are still waiting for Google. PixelFerry stopped checking so it won't keep opening Google Photos. Tap \"Finish now\" later.".format(left) else ""
-        Notifs.alert(this, r.title, r.detail)
+        r.phase = Phase.DONE
+        r.title = "All copied 🎉"
+        r.detail = "$summary\nWhen Google Photos has backed them up, tap \"Make them deletable\" to free space and allow deleting from ${r.deviceLabel.ifEmpty { "the device" }}."
+        Notifs.alert(this, r.title, "$summary")
     }
 
     private fun batteryGuard() {
@@ -343,7 +323,6 @@ class TransferService : Service() {
         const val ACTION_RUN = "run"
         const val ACTION_STOP = "stop"
         const val ACTION_DELETE = "delete"
-        const val ACTION_FINISH = "finish"
         const val ACTION_RECV_ON = "recv_on"
         const val ACTION_RECV_OFF = "recv_off"
 

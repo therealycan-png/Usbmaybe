@@ -37,23 +37,14 @@ object Notifs : WaveNotifier {
     }
 
     /** Manual fallback: one tap opens Google Photos; the free-up window is already open. */
-    /** Manual fallback. Tapping it goes through PixelFerry first, which opens the short free-up window. */
-    fun askFreeUp(ctx: Context) {
-        val pi = PendingIntent.getActivity(ctx, 1, Intent(ctx, MainActivity::class.java)
-            .setAction(MainActivity.ACTION_FREE_UP_NOW).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
-        alert(ctx, "Tap: Free up space in Google Photos",
-            "Google Photos looks done backing up. Tap here, then in Google Photos tap your profile picture > " +
-                "Free up space, and confirm. PixelFerry continues by itself after that.", pi)
-    }
-
     private fun cleanAlert() = nm(App.instance).cancel(ID_ALERT)
 
     override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {
-        if (Hub.wave.inFinal) return // the final step keeps its own summary text
         if (Hub.run.phase != Phase.WAITING_GOOGLE) Hub.run.waitStartedAt = System.currentTimeMillis()
         Hub.run.phase = Phase.WAITING_GOOGLE
-        Hub.run.title = "Pixel is full: waiting for Google"
-        Hub.run.detail = "Google Photos is backing up this batch (usually 10–30 min), then copying continues by itself."
+        Hub.run.title = "Pixel is full: free up space"
+        Hub.run.detail = "Paused. Nothing is lost. Free up space in Google Photos, then tap Continue."
+        alert(App.instance, "Pixel is full: transfer paused", "Open PixelFerry and tap Free up space. When Google Photos is done, tap Continue.")
     }
 
     override fun stuck(reason: String) {

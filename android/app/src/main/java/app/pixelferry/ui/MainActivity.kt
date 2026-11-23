@@ -21,10 +21,9 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Toast
-import app.pixelferry.FreeUpService
 import app.pixelferry.Hub
 import app.pixelferry.Phase
-import app.pixelferry.PhotosWatcher
+import app.pixelferry.GooglePhotos
 import app.pixelferry.TransferService
 import app.pixelferry.TransferService.Companion.fmt
 import app.pixelferry.core.Item
@@ -83,8 +82,8 @@ class MainActivity : Activity() {
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIntent(intent) }
     override fun onDestroy() { unregisterReceiver(permReceiver); unregisterReceiver(attachReceiver); super.onDestroy() }
-    override fun onResume() { super.onResume(); Hub.uiVisible = true; renderAll(); tick() }
-    override fun onPause() { Hub.uiVisible = false; ui.removeCallbacksAndMessages(null); super.onPause() }
+    override fun onResume() { super.onResume(); renderAll(); tick() }
+    override fun onPause() { ui.removeCallbacksAndMessages(null); super.onPause() }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
@@ -128,13 +127,11 @@ class MainActivity : Activity() {
     private val runDetail by lazy { p() }
     private val stats by lazy { statRow("" to "files", "" to "speed", "" to "time left") }
     private var filesLabel: android.widget.TextView? = null
-    private val freeBtn by lazy { btn("Make room now", primary = true) { freeUpNow() } }
+    private val freeBtn by lazy { btn("Free up space (opens Google Photos)", primary = true) { freeUpNow() } }
     private val stopBtn by lazy { link("Stop", C.DANGER) { confirmStop() } }
     private val detailsLink by lazy { link("Show details", C.INK2) {
         AlertDialog.Builder(this).setTitle("Details").setMessage(Hub.run.errors.takeLast(20).joinToString("\n\n")).setPositiveButton("OK", null).show()
     } }
-    private var helpOpen = false
-    private val takingLong by lazy { link("Taking long?") { helpOpen = true } }
     private val resumeBtn by lazy { btn("Resume", primary = true) { resume() } }
     private val seeBtn by lazy { btn("See them in Google Photos") { seeInPhotos(Hub.run.tag) } }
 
@@ -149,20 +146,21 @@ class MainActivity : Activity() {
     /** Opens a Google Photos search for the file tag (e.g. Mom_iPhone13). */
     private fun seeInPhotos(tag: String) {
         val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://photos.google.com/search/" + Uri.encode(tag)))
-        try { startActivity(i.setPackage(PhotosWatcher.PHOTOS)) } catch (_: Exception) {
+        try { startActivity(i.setPackage(GooglePhotos.PKG)) } catch (_: Exception) {
             try { startActivity(Intent(Intent.ACTION_VIEW, i.data)) } catch (_: Exception) { toast("In Google Photos, search $tag") }
         }
     }
 
-    /** Stays on screen while waiting (a toast would vanish). */
+    /** The 3 steps, always visible while the Pixel is full. */
     private val freeHelp by lazy {
-        text("Make room yourself:\n1. Tap Make room now (opens Google Photos)\n2. In Google Photos tap Free up space\n3. Tap the blue Free up button\nGoogle only clears copies it has backed up. PixelFerry continues by itself.", 15f, C.INK).apply {
+        text(FREE_STEPS, 15f, C.INK).apply {
             background = rounded(C.TINT_AMBER, dpf(14f)); setPadding(dp(14), dp(12), dp(14), dp(12))
         }
     }
+    private val continueBtn by lazy { btn("Continue") { continueAfterFreeUp() } }
     private val runCard by lazy {
         card().add(runChip, runTitle, centered(ring).apply { setPadding(0, dp(12), 0, dp(4)) }, stats,
-            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, freeBtn, takingLong, freeHelp, folderTip, detailsLink, stopBtn)
+            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, freeHelp, freeBtn, continueBtn, folderTip, detailsLink, stopBtn)
     }
     /** Google backs up a new device folder only after one switch in Google Photos: ask right away, not hours later. */
     private val folderTip by lazy {
@@ -171,7 +169,7 @@ class MainActivity : Activity() {
             (layoutParams as? LinearLayout.LayoutParams)?.topMargin = dp(10)
             addView(text("One tap so Google backs these up", 16f, C.INK, bold = true))
             addView(text("1. Open Google Photos\n2. Tap your profile picture\n3. Photos settings › Backup\n4. Back up device folders\n5. Turn on the PixelFerry folder", 15f, C.INK))
-            addView(link("Open Google Photos") { packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) } })
+            addView(link("Open Google Photos") { GooglePhotos.open(this@MainActivity) })
             addView(link("It's on", C.INK2) { getSharedPreferences("pf", 0).edit().putBoolean("folderOk_${Hub.run.deviceLabel}", true).apply(); visibility = View.GONE })
         }
     }
@@ -186,7 +184,7 @@ class MainActivity : Activity() {
             val (chipText, fg, bg) = when (r.phase) {
                 Phase.DONE, Phase.DELETE_DONE -> Triple("✓  Finished", C.SUCCESS, C.TINT_GREEN)
                 Phase.DONE_PENDING_GOOGLE, Phase.FINISHING -> Triple("☁  Google is backing up", C.PRIMARY, C.TINT_BLUE)
-                Phase.WAITING_GOOGLE -> Triple("☁  Waiting for Google", C.WARN, C.TINT_AMBER)
+                Phase.WAITING_GOOGLE -> Triple("⏸  Pixel full: paused", C.WARN, C.TINT_AMBER)
                 Phase.UNPLUGGED -> Triple("🔌  Plug back in", C.WARN, C.TINT_AMBER)
                 Phase.LOW_BATTERY -> Triple("🔋  Charging break", C.WARN, C.TINT_AMBER)
                 Phase.STOPPED -> Triple("■  Stopped", C.INK2, C.LINE)
@@ -199,8 +197,7 @@ class MainActivity : Activity() {
             runTitle.text = r.title
             runDetail.text = r.detail + if (r.failed > 0) "\n⚠ %,d file(s) couldn't be copied and were left on the device.".format(r.failed) else ""
             detailsLink.visibility = if (r.errors.isNotEmpty()) View.VISIBLE else View.GONE
-            freeHelp.visibility = if (waiting && helpOpen) View.VISIBLE else View.GONE
-            takingLong.visibility = if (waiting && !helpOpen) View.VISIBLE else View.GONE
+            freeHelp.visibility = if (waiting) View.VISIBLE else View.GONE
             resumeBtn.visibility = if (!r.active && r.phase in setOf(Phase.UNPLUGGED, Phase.STOPPED, Phase.ERROR) && r.total > r.done) View.VISIBLE else View.GONE
             resumeBtn.text = "Resume · %,d left".format((r.total - r.done).coerceAtLeast(0))
             seeBtn.visibility = if (!r.active && r.phase in setOf(Phase.DONE, Phase.DONE_PENDING_GOOGLE) && r.tag.isNotEmpty()) View.VISIBLE else View.GONE
@@ -224,25 +221,14 @@ class MainActivity : Activity() {
             (stats.findViewWithTag<android.widget.TextView>("time left")?.parent as? LinearLayout)?.getChildAt(1)
                 ?.let { (it as android.widget.TextView).text = if (r.active) "time left" else "took" }
             (stats.findViewWithTag<android.widget.TextView>("time left")?.parent as? LinearLayout)?.getChildAt(1)
-                ?.let { if (waiting) (it as android.widget.TextView).text = "Google backup" }
+                ?.let { if (waiting) (it as android.widget.TextView).text = "paused" }
             setStat("time left", when { !r.active && r.startedAt > 0 -> dur(took)
-                waiting -> "waiting " + dur(((System.currentTimeMillis() - r.waitStartedAt) / 1000).coerceAtLeast(0)); left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
+                waiting -> dur(((System.currentTimeMillis() - r.waitStartedAt) / 1000).coerceAtLeast(0)); left < 0 -> "–"; left < 60 -> "<1 min"; left < 3600 -> "${left / 60} min"; else -> "${left / 3600} h ${left % 3600 / 60} m" })
             freeBtn.visibility = if (waiting) View.VISIBLE else View.GONE
+            continueBtn.visibility = if (waiting) View.VISIBLE else View.GONE
             stopBtn.visibility = if (r.active) View.VISIBLE else View.GONE
         }
-        // keep the screen on during a run so the free-up helper can tap Google Photos
-        // Battery saver: during a run the screen is dimmed, and only kept on while the battery can afford it
-        // (keeping it on lets the helper tap Google's "Free up space"; otherwise you get a notification instead).
         val (level, charging) = battery()
-        // Keep the screen on only when it helps: waiting for Google with the helper on and still allowed to tap.
-        val waitingNow = r.active && (r.phase == Phase.WAITING_GOOGLE || r.phase == Phase.FINISHING)
-        val helperUseful = waitingNow && FreeUpService.instance != null && Hub.wave.autoAllowed && (charging || level >= 30)
-        if (helperUseful) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // Dim only after 30 s without a touch, and only while kept on (any touch brightens it again).
-        val lp = window.attributes
-        val wantDim = if (helperUseful && System.currentTimeMillis() - lastTouch > 30_000) 0.05f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-        if (lp.screenBrightness != wantDim) { lp.screenBrightness = wantDim; window.attributes = lp }
         batteryCard.visibility = if (r.active && !charging && Hub.source is MtpSource) View.VISIBLE else View.GONE
         batteryText.text = "Pixel battery $level% and dropping: the Pixel is powering the other device through the cable."
         if (!r.active && runCard.tag != "idle") { runCard.tag = "idle"; renderDelete() }
@@ -252,8 +238,6 @@ class MainActivity : Activity() {
 
     private fun dur(sec: Long) = when { sec < 60 -> "<1 min"; sec < 3600 -> "${sec / 60} min"; else -> "${sec / 3600} h ${sec % 3600 / 60} m" }
 
-    private var lastTouch = System.currentTimeMillis()
-    override fun onUserInteraction() { super.onUserInteraction(); lastTouch = System.currentTimeMillis() }
 
     /** Copy speed over the last minute of actual copying (skipped files and waiting don't distort it). */
     private val samples = ArrayDeque<Pair<Long, Long>>()
@@ -312,13 +296,21 @@ class MainActivity : Activity() {
             .setPositiveButton("Stop") { _, _ -> TransferService.send(this, TransferService.ACTION_STOP) }.show()
     }
 
-    /** You chose to run Free up space. */
+    /** Step 1: open the free-up window and Google Photos. */
     private fun freeUpNow() {
-        if (FreeUpService.instance != null) FreeUpService.watchManual = true // window opens when Google's confirm is pressed
-        else thread { Hub.tracker.openFreeUpWindow(); Hub.watchWindow() }
-        packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) }
-            ?: toast("Google Photos is not installed")
+        Hub.startFreeUp(this)
+        toast("In Google Photos: wait until backup is done, then profile picture › Free up space › Free up")
+    }
 
+    /** Step 3: back from Google Photos. Credit what Google freed; a paused transfer continues by itself. */
+    private fun continueAfterFreeUp() {
+        thread {
+            val n = Hub.finishFreeUp(this)
+            runOnUiThread {
+                toast(if (n > 0) "%,d photos confirmed in Google Photos".format(n) else "Nothing was freed yet. Is Google Photos done backing up?")
+                renderDelete()
+            }
+        }
     }
 
     // ---------------- sources ----------------
@@ -340,6 +332,27 @@ class MainActivity : Activity() {
         sourcesBox.addView(tile("🗂️", C.TINT_AMBER, "A folder, SD card or USB drive", "Pick it with Android's file picker") {
             @Suppress("DEPRECATION") startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_TREE)
         })
+    }
+
+    private fun makeDeletableTile(onPixel: Int) = if (Hub.freeUpInProgress(this))
+        tile("✅", C.TINT_GREEN, "Done in Google Photos? Tap to check", "PixelFerry counts what Google freed", highlight = true) { continueAfterFreeUp() }
+    else tile("☁️", C.TINT_BLUE, "Make them deletable",
+        "%,d copies are on the Pixel. Free them in Google Photos, then you can delete the originals.".format(onPixel)) { makeDeletable() }
+
+    /** The manual free-up, step by step. */
+    private fun makeDeletable() {
+        if (Hub.freeUpInProgress(this)) {
+            AlertDialog.Builder(this).setTitle("Done in Google Photos?")
+                .setMessage("If you ran Free up space in Google Photos, tap Check. PixelFerry counts the photos Google removed as safely backed up.")
+                .setPositiveButton("Check") { _, _ -> continueAfterFreeUp() }
+                .setNeutralButton("Open Google Photos") { _, _ -> GooglePhotos.open(this) }
+                .setNegativeButton("Later", null).show()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Make them deletable")
+            .setMessage(FREE_STEPS)
+            .setPositiveButton("Free up space") { _, _ -> freeUpNow() }
+            .setNegativeButton("Later", null).show()
     }
 
     private fun cableHelp() {
@@ -453,9 +466,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (isDestroyed) return@runOnUiThread
                     deleteBox.removeAllViews()
-                    if (waitingGoogle > 0 && !Hub.run.active) deleteBox.addView(tile("☁️", C.TINT_BLUE, "Finish now",
-                        "%,d on the Pixel are waiting for Google. Tap to check and free them.".format(waitingGoogle)) {
-                        TransferService.send(this, TransferService.ACTION_FINISH) })
+                    if (waitingGoogle > 0 && !Hub.run.active) deleteBox.addView(makeDeletableTile(waitingGoogle))
                     for ((label, n) in list) deleteBox.addView(tile("🧹", C.TINT_GREEN, "Delete originals from $label",
                         "%,d are safe in Google Photos. Plug it in to delete them there.".format(n)) { cableHelp() })
                 }
@@ -487,13 +498,11 @@ class MainActivity : Activity() {
             c.addView(p("This device has no serial number, so PixelFerry won't delete from it. Delete them on the device itself.", 15f, C.WARN))
         } else if (items.isNotEmpty()) {
             c.addView(btn("Delete originals from $label", primary = true, color = C.DANGER) {
-                if (Hub.run.active && Hub.run.phase != Phase.FINISHING) toast("Wait until the current transfer finishes, then delete.")
+                if (Hub.run.active) toast("Wait until the current transfer finishes, then delete.")
                 else confirmDelete(label, items.size, items.sumOf { it.size })
             })
         }
-        if (waiting > 0 && !Hub.run.active) c.addView(link("Finish now: get the last %,d confirmed".format(waiting)) {
-            TransferService.send(this, TransferService.ACTION_FINISH)
-        })
+        if (waiting > 0 && !Hub.run.active) c.addView(link("Make the other %,d deletable".format(waiting)) { makeDeletable() })
         deleteBox.addView(c)
     }
 
@@ -507,7 +516,7 @@ class MainActivity : Activity() {
         val dlg = AlertDialog.Builder(this)
             .setTitle("Delete %,d originals from $label?".format(n))
             .setView(box)
-            .setNeutralButton("Check in Google Photos") { _, _ -> packageManager.getLaunchIntentForPackage(PhotosWatcher.PHOTOS)?.let { startActivity(it) } }
+            .setNeutralButton("Check in Google Photos") { _, _ -> GooglePhotos.open(this) }
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Continue") { _, _ ->
                 AlertDialog.Builder(this)
@@ -563,5 +572,10 @@ class MainActivity : Activity() {
         const val ACTION_USB_PERMISSION = "app.pixelferry.USB_PERMISSION"
         const val REQ_TREE = 7
         const val ACTION_FREE_UP_NOW = "app.pixelferry.FREE_UP_NOW"
+        const val FREE_STEPS = "1. Tap Free up space (opens Google Photos).\n" +
+            "2. In Google Photos, wait until backup is finished (the cloud at the top shows it's done).\n" +
+            "3. Tap your profile picture › Free up space › Free up.\n" +
+            "4. Come back here and tap Continue (or Check).\n\n" +
+            "Google only removes photos it has backed up. Only those can be deleted from your phones."
     }
 }

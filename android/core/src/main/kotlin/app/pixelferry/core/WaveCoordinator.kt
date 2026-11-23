@@ -1,185 +1,68 @@
 package app.pixelferry.core
 
-/** What the platform tells us about Google Photos. Android: NotificationListenerService. */
-interface BackupSignals {
-    /** Is Google Photos currently showing a "Backing up…" notification? null = no notification access. */
-    fun backingUp(): Boolean?
-    /** Last time Google Photos backup activity was seen (ms), 0 if never. */
-    fun lastActivityMs(): Long
-}
-
-/** Android: AccessibilityService that taps Google Photos' own "Free up space". */
-interface FreeUpAction {
-    /**
-     * Start Google Photos' Free up space. The implementation must call
-     * [BackupTracker.openFreeUpWindow] itself at the moment the free-up is really confirmed
-     * (helper pressing the confirm button, or the user tapping "Free up now").
-     * @return true if an automatic attempt was started; false = user was asked to do it.
-     */
-    fun requestFreeUp(auto: Boolean): Boolean
-}
-
 interface WaveNotifier {
+    /** The Pixel is full: the transfer is paused until you free space. */
     fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int)
     fun stuck(reason: String)
     fun resumed()
 }
 
 /**
- * Pixel full -> wait until Google Photos is done uploading -> run Free up space
- * (Google removes only what it has backed up) -> space returns -> keep going.
- * No guessing, no deleting on our own.
+ * Manual waves. When the Pixel is full the transfer simply pauses. You free space yourself with
+ * Google Photos' own "Free up space" (started from PixelFerry's button, which opens a free-up
+ * window so the freed photos count as backed up), then tap Continue. Nothing runs in the
+ * background: no watching notifications, no auto-tapping, no timers that open apps.
  */
 class WaveCoordinator(
     private val engine: IngestEngine,
     private val tracker: BackupTracker,
-    private val signals: BackupSignals,
-    private val freeUp: FreeUpAction,
     private val notifier: WaveNotifier,
     private val clock: () -> Long = System::currentTimeMillis,
-    /** Google Photos must look idle this long before we free up. */
-    val quietMs: Long = 4 * 60_000L,
-    /** Time between free-up attempts; grows (×1, ×1.7, ×3.3, ×5) so it never nags. */
-    val retryMs: Long = 12 * 60_000L,
-    /** Final wave: stop after this many attempts in a row that freed nothing. */
-    val finalMaxFruitless: Int = 3,
-    /** Room wait: after this many fruitless attempts, stop opening Google Photos by itself (notify instead). */
-    val autoMaxFruitless: Int = 2,
-    /** Room wait: give up (clear "stuck" state) after this many fruitless attempts. */
-    val roomMaxFruitless: Int = 5,
-    /** Final wave never runs longer than this, whatever Google Photos' notifications say. */
-    val finalMaxMs: Long = 3 * 3600_000L,
-    /** Room wait never runs longer than this. */
-    val roomMaxMs: Long = 12 * 3600_000L,
-    /** "Busy" with nothing leaving the Pixel for this long counts as a fruitless attempt (stuck upload). */
-    val stalledMs: Long = 60 * 60_000L,
-    /** Wait at least this long after the wave's last file so Photos notices it. */
-    val settleMs: Long = 3 * 60_000L,
-    private val autoTap: () -> Boolean = { true },
+    /** A paused transfer gives up after this long (so the phone isn't kept busy for days). */
+    val maxWaitMs: Long = 24 * 3600_000L,
 ) {
     enum class Phase { RUNNING, WAITING }
 
     @Volatile var phase = Phase.RUNNING; private set
     @Volatile var neededBytes = 0L; private set
     @Volatile var waveNumber = 1; private set
-    private var waitStarted = 0L
-    private var lastAttempt = 0L
-    private var attempts = 0
-    private var lastFileAt = 0L
-    private var stuckReported = false
-    private var isFinal = false
-    /** Attempts in a row after which nothing left the Pixel. */
-    @Volatile var fruitless = 0; private set
-    private var onPixelAtAttempt = -1
-    /** Gave up: Google hasn't freed space/the rest (yet). */
+    /** The wait ended without room coming back. */
     @Volatile var gaveUp = false; private set
-    private var lastProgressAt = 0L
-    private var lastOnPixel = -1
-    /** True while the final (after-last-file) wave is running. */
-    val inFinal: Boolean get() = isFinal && phase == Phase.WAITING
-    /** Auto-opening Google Photos is still allowed for this wait. */
-    val autoAllowed: Boolean get() = fruitless < autoMaxFruitless
+    private var waitStarted = 0L
+    private var lastReconcile = 0L
 
-    fun fileStored() { lastFileAt = clock() }
-
-    private var goal: () -> Boolean = { true }
+    fun fileStored() {}
 
     @Synchronized fun beginWait(bytes: Long) {
         if (phase == Phase.WAITING) { neededBytes = maxOf(neededBytes, bytes); return }
-        start(bytes) { engine.hasRoomFor(neededBytes) }
+        phase = Phase.WAITING; neededBytes = bytes; waitStarted = clock(); gaveUp = false
         notifier.waiting(bytes, engine.freeBytes(), 0)
     }
 
-    /** Final wave: after the last file, get everything still on the Pixel confirmed by Google. */
-    @Synchronized fun beginFinal(remainingOnPixel: () -> Int) {
-        start(0) { remainingOnPixel() == 0 }
-        isFinal = true
-    }
-
-    private fun start(bytes: Long, done: () -> Boolean) {
-        phase = Phase.WAITING; neededBytes = bytes; goal = done; isFinal = false
-        waitStarted = clock(); attempts = 0; lastAttempt = 0; stuckReported = false
-        fruitless = 0; onPixelAtAttempt = -1; gaveUp = false
-        lastProgressAt = clock(); lastOnPixel = -1
-    }
-
-    private fun giveUp(): Boolean { gaveUp = true; phase = Phase.RUNNING; return true }
-
-    private fun delayFor(attempt: Int): Long = when (attempt) {
-        0, 1 -> retryMs
-        2 -> retryMs * 5 / 3
-        3 -> retryMs * 10 / 3
-        else -> retryMs * 5
-    }
-
-    /** One step of the waiting loop. @return true when the goal is reached. */
+    /** One check. @return true when the wait is over (room is back, or it gave up). */
     @Synchronized fun tick(): Boolean {
         if (phase == Phase.RUNNING) return true
-        val rec = tracker.reconcile()
-        if (goal()) {
+        val now = clock()
+        // while you're freeing space through PixelFerry's button, credit what Google removes
+        if (tracker.isWindowOpen() && now - lastReconcile >= 15_000) { lastReconcile = now; tracker.reconcile() }
+        if (engine.hasRoomFor(neededBytes)) {
             phase = Phase.RUNNING; waveNumber++; notifier.resumed(); return true
         }
-        val now = clock()
-        // hard limits: never wait (and hold the phone awake) forever
-        if (now - waitStarted > (if (isFinal) finalMaxMs else roomMaxMs)) return giveUp()
-        if (rec.stillOnPixel >= 0 && rec.stillOnPixel != lastOnPixel) {
-            if (lastOnPixel >= 0 && rec.stillOnPixel < lastOnPixel) lastProgressAt = now
-            lastOnPixel = rec.stillOnPixel
-        }
-        // Final wave: nothing leaves the Pixel for an hour (e.g. a stuck "waiting for Wi-Fi" upload) = fruitless.
-        // (Not for the room wait: a big batch can legitimately upload for hours; roomMaxMs bounds that.)
-        if (isFinal && now - lastProgressAt > stalledMs) { fruitless++; lastProgressAt = now }
-        if (isFinal && fruitless >= finalMaxFruitless) return giveUp()
-        if (!isFinal && fruitless >= roomMaxFruitless) return giveUp()
-        // judge the previous attempt once it has had time to work
-        if (onPixelAtAttempt >= 0 && rec.stillOnPixel >= 0 && now - lastAttempt >= minOf(retryMs, 5 * 60_000L)) {
-            if (rec.stillOnPixel < onPixelAtAttempt) fruitless = 0 else fruitless++
-            onPixelAtAttempt = -1
-            if (isFinal && fruitless >= finalMaxFruitless) return giveUp()
-            if (!isFinal && fruitless >= roomMaxFruitless) return giveUp()
-        }
-        if (now - lastFileAt < settleMs) return false
-        val busy = signals.backingUp()
-        val idleLongEnough = when (busy) {
-            true -> false
-            false -> now - signals.lastActivityMs() >= quietMs
-            null -> now - waitStarted >= quietMs * 3 // no notification access: just wait longer
-        }
-        if (idleLongEnough && (lastAttempt == 0L || now - lastAttempt >= delayFor(attempts))) {
-            attempts++; lastAttempt = now
-            onPixelAtAttempt = rec.stillOnPixel
-            val auto = freeUp.requestFreeUp(autoTap() && fruitless < autoMaxFruitless)
-            notifier.waiting(neededBytes, engine.freeBytes(), attempts)
-            if (!auto) { /* user notified to tap Free up space; window is open for them */ }
-        }
-        if (fruitless >= 2 && !stuckReported) {
-            stuckReported = true
-            notifier.stuck(
-                "Free up space ran $attempts times but no room came back. In Google Photos > Settings > " +
-                    "Backup > Back up device folders, turn ON every PixelFerry folder, and keep Wi-Fi on."
-            )
+        if (now - waitStarted > maxWaitMs) {
+            gaveUp = true; phase = Phase.RUNNING
+            notifier.stuck("The Pixel stayed full. Free up space in Google Photos, then tap Resume.")
+            return true
         }
         return false
     }
 
-    /** Blocking wait used by the USB job. @return true if room came back (false = cancelled or gave up: check [gaveUp]). */
-    fun awaitRoom(bytes: Long, cancelled: () -> Boolean, sleepMs: Long = 20_000): Boolean {
+    /** Blocking wait used by the transfer. @return true if room came back (false = cancelled or gave up). */
+    fun awaitRoom(bytes: Long, cancelled: () -> Boolean, sleepMs: Long = 5_000): Boolean {
         beginWait(bytes)
-        return loop(cancelled, sleepMs) && !gaveUp
-    }
-
-    fun awaitAllBackedUp(remainingOnPixel: () -> Int, cancelled: () -> Boolean, sleepMs: Long = 20_000): Boolean {
-        beginFinal(remainingOnPixel)
-        return loop(cancelled, sleepMs)
-    }
-
-    private var waiters = 0
-
-    private fun loop(cancelled: () -> Boolean, sleepMs: Long): Boolean {
         synchronized(this) { waiters++ }
         try {
             while (!cancelled()) {
-                if (tick()) return true
+                if (tick()) return !gaveUp
                 Thread.sleep(sleepMs)
             }
             return false
@@ -187,4 +70,6 @@ class WaveCoordinator(
             synchronized(this) { if (--waiters == 0 && phase == Phase.WAITING) phase = Phase.RUNNING }
         }
     }
+
+    private var waiters = 0
 }

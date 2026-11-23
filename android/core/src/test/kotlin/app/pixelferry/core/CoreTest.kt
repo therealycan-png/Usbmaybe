@@ -100,55 +100,42 @@ class CoreTest {
         assertEquals(listOf("a"), ledger.deletableFor(mom.deviceKey).map { it.itemKey })
     }
 
-    @Test fun wave_waits_for_quiet_then_frees_then_resumes() {
-        val clock = FakeClock(); val ledger = MemoryLedger(); val root = tempDir()
-        val storage = FakeStorage(root, capacity = 100_000)
-        val eng = IngestEngine(storage, ledger, reserveBytes = 10_000)
-        val item = (eng.ingest(mom, "a", "a.jpg", 80_000, 0, null) { it.writeBytes(ByteArray(80_000)) } as IngestResult.Stored).item
-        var backingUp: Boolean? = true
-        var lastAct = clock.now
-        val freeUps = mutableListOf<Boolean>()
-        val events = mutableListOf<String>()
-        val tracker = BackupTracker(ledger, clock::now)
-        val wave = WaveCoordinator(eng, tracker,
-            object : BackupSignals { override fun backingUp() = backingUp; override fun lastActivityMs() = lastAct },
-            object : FreeUpAction { override fun requestFreeUp(auto: Boolean): Boolean {
-                freeUps += auto; tracker.openFreeUpWindow(); File(item.pixelPath!!).delete(); return true } }, // helper confirms, Google frees
-            object : WaveNotifier {
-                override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) { events += "wait$attempt" }
-                override fun stuck(reason: String) { events += "stuck" }
-                override fun resumed() { events += "resumed" }
-            }, clock::now)
-        wave.fileStored()
-        wave.beginWait(50_000)
-        assertFalse(wave.tick()); assertTrue(freeUps.isEmpty(), "never free up while Photos is still uploading")
-        clock.advance(10 * 60_000); assertFalse(wave.tick()); assertTrue(freeUps.isEmpty())
-        backingUp = false; lastAct = clock.now
-        clock.advance(60_000); assertFalse(wave.tick()); assertTrue(freeUps.isEmpty(), "needs quiet period")
-        clock.advance(5 * 60_000); assertFalse(wave.tick()); assertEquals(1, freeUps.size)
-        assertTrue(wave.tick(), "space is back")
-        assertEquals(ItemState.BACKED_UP, ledger.get(item.id)!!.state)
-        assertEquals(WaveCoordinator.Phase.RUNNING, wave.phase)
-        assertEquals(2, wave.waveNumber)
-        assertTrue("resumed" in events)
+    private val quiet = object : WaveNotifier {
+        override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {}
+        override fun stuck(reason: String) {}
+        override fun resumed() {}
     }
 
-    @Test fun wave_reports_stuck_when_folder_not_backed_up() {
+    @Test fun manual_wave_pauses_until_you_free_space_then_continues() {
         val clock = FakeClock(); val ledger = MemoryLedger(); val root = tempDir()
         val eng = IngestEngine(FakeStorage(root, capacity = 100_000), ledger, reserveBytes = 10_000)
-        eng.ingest(mom, "a", "a.jpg", 80_000, 0, null) { it.writeBytes(ByteArray(80_000)) }
-        var stuck = ""
-        val wave = WaveCoordinator(eng, BackupTracker(ledger, clock::now),
-            object : BackupSignals { override fun backingUp() = false; override fun lastActivityMs() = 0L },
-            object : FreeUpAction { override fun requestFreeUp(auto: Boolean) = true },
-            object : WaveNotifier {
-                override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {}
-                override fun stuck(reason: String) { stuck = reason }
-                override fun resumed() {}
-            }, clock::now)
+        val item = (eng.ingest(mom, "a", "a.jpg", 80_000, 0, null) { it.writeBytes(ByteArray(80_000)) } as IngestResult.Stored).item
+        val tracker = BackupTracker(ledger, clock::now)
+        val events = mutableListOf<String>()
+        val wave = WaveCoordinator(eng, tracker, object : WaveNotifier {
+            override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) { events += "full" }
+            override fun stuck(reason: String) { events += "stuck" }
+            override fun resumed() { events += "resumed" }
+        }, clock::now)
         wave.beginWait(50_000)
-        repeat(6) { clock.advance(13 * 60_000); assertFalse(wave.tick()) }
-        assertTrue(stuck.contains("Back up device folders"))
+        repeat(10) { clock.advance(60_000); assertFalse(wave.tick(), "just waits: nothing is opened or tapped") }
+        // you tap "Free up space" in PixelFerry (window opens), Google frees the backed-up file
+        tracker.openFreeUpWindow(2 * 3600_000L)
+        File(item.pixelPath!!).delete()
+        clock.advance(20_000)
+        assertTrue(wave.tick(), "space is back: continues by itself")
+        assertEquals(ItemState.BACKED_UP, ledger.get(item.id)!!.state)
+        assertEquals(listOf("full", "resumed"), events)
+    }
+
+    @Test fun manual_wave_gives_up_after_a_day() {
+        val clock = FakeClock(); val ledger = MemoryLedger()
+        val eng = IngestEngine(FakeStorage(tempDir(), capacity = 100_000), ledger, reserveBytes = 10_000)
+        eng.ingest(mom, "a", "a.jpg", 80_000, 0, null) { it.writeBytes(ByteArray(80_000)) }
+        val wave = WaveCoordinator(eng, BackupTracker(ledger, clock::now), quiet, clock::now)
+        wave.beginWait(50_000)
+        clock.advance(23 * 3600_000L); assertFalse(wave.tick())
+        clock.advance(2 * 3600_000L); assertTrue(wave.tick()); assertTrue(wave.gaveUp)
         assertEquals(0, ledger.deletableFor(mom.deviceKey).size, "nothing became deletable")
     }
 
@@ -189,75 +176,6 @@ class Mp4CheckTest {
         assertEquals(full.size.toLong(), (r as IngestResult.Stored).item.size)
         assertFailsWith<VerifyFailed> { eng.ingest(p, "big2", "IMG_2.MOV", UNKNOWN_SIZE, 0, null) { it.writeBytes(full.copyOf(5000)) } }
         assertFailsWith<VerifyFailed> { eng.ingest(p, "big3", "IMG_3.JPG", UNKNOWN_SIZE, 0, null) { it.writeBytes(full) } }
-    }
-}
-
-class NoNaggingTest {
-    private val mom = DeviceProfile("dev-iphone", "Mom", "iPhone 13")
-
-    /** Google never frees the last file (e.g. not backed up): PixelFerry must stop opening Google Photos. */
-    @Test fun final_wave_gives_up_and_stops_auto_opening_photos() {
-        var t = 0L; val ledger = MemoryLedger(); val root = tempDir()
-        val eng = IngestEngine(FakeStorage(root), ledger, reserveBytes = 0)
-        eng.ingest(mom, "a", "a.jpg", 10, 0, null) { it.writeBytes(ByteArray(10)) }
-        val calls = mutableListOf<Boolean>()
-        val wave = WaveCoordinator(eng, BackupTracker(ledger, { t }),
-            object : BackupSignals { override fun backingUp() = false; override fun lastActivityMs() = 0L },
-            object : FreeUpAction { override fun requestFreeUp(auto: Boolean): Boolean { calls += auto; return auto } },
-            object : WaveNotifier {
-                override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {}
-                override fun stuck(reason: String) {}
-                override fun resumed() {}
-            }, { t }, settleMs = 0)
-        wave.beginFinal { ledger.byState(ItemState.VERIFIED).size }
-        var done = false
-        for (i in 0 until 400) { t += 60_000; if (wave.tick()) { done = true; break } }   // ~6.6 hours of ticks
-        assertTrue(done, "final wave ends by itself")
-        assertTrue(wave.gaveUp, "reports that Google didn't free the rest")
-        assertTrue(calls.size <= 4, "a handful of tries, not one every 12 minutes forever: ${calls.size}")
-        assertEquals(listOf(true, true), calls.take(2))
-        assertTrue(calls.drop(2).all { !it }, "after 2 fruitless tries it only notifies, never auto-opens: $calls")
-        assertTrue(t < 4 * 3600_000L, "gives up within a few hours")
-    }
-}
-
-class LimitsTest {
-    private val mom = DeviceProfile("d", "Mom", "iPhone")
-    private fun setup(busy: Boolean, capacity: Long = Long.MAX_VALUE / 4): Triple<IngestEngine, MemoryLedger, (Long) -> WaveCoordinator> {
-        val ledger = MemoryLedger(); val eng = IngestEngine(FakeStorage(tempDir(), capacity), ledger, reserveBytes = 0)
-        eng.ingest(mom, "a", "a.jpg", 10, 0, null) { it.writeBytes(ByteArray(10)) }
-        return Triple(eng, ledger) { t0 ->
-            var t = t0
-            WaveCoordinator(eng, BackupTracker(ledger),
-                object : BackupSignals { override fun backingUp() = busy; override fun lastActivityMs() = 0L },
-                object : FreeUpAction { override fun requestFreeUp(auto: Boolean) = true },
-                object : WaveNotifier { override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {}
-                    override fun stuck(reason: String) {}; override fun resumed() {} }, { clockNow }, settleMs = 0)
-        }
-    }
-    private var clockNow = 0L
-
-    @Test fun final_wave_ends_even_if_photos_says_busy_forever() {
-        val (_, ledger, mk) = setup(busy = true)
-        val wave = mk(0)
-        wave.beginFinal { ledger.byState(ItemState.VERIFIED).size }
-        var ended = false
-        for (i in 0 until 1000) { clockNow += 60_000; if (wave.tick()) { ended = true; break } }
-        assertTrue(ended && wave.gaveUp, "a stuck 'backing up' notification can't keep it running")
-        assertTrue(clockNow <= 3 * 3600_000L + 60_000, "within the 3 h cap: ${clockNow / 60_000} min")
-    }
-
-    @Test fun pixel_full_wait_gives_up_instead_of_nagging_for_days() {
-        val (eng, _, mk) = setup(busy = false, capacity = 20)
-        val wave = mk(0)
-        var room = true
-        val t = Thread { room = wave.awaitRoom(100, { false }, sleepMs = 0) }
-        // drive the clock from here
-        t.start()
-        while (t.isAlive) { clockNow += 60_000; Thread.sleep(1) }
-        assertFalse(room); assertTrue(wave.gaveUp)
-        assertTrue(clockNow <= 12 * 3600_000L + 5 * 60_000, "bounded: ${clockNow / 3600_000} h")
-        assertNotNull(eng)
     }
 }
 

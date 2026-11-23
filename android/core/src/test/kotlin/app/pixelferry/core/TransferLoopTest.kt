@@ -24,7 +24,6 @@ class TransferLoopTest {
         fun entries() = files.entries.mapIndexed { i, (k, v) -> SourceEntry("DCIM/$k|${v.size}|$i", k, v.size.toLong(), 1_000L * i, "DCIM", k) }
     }
 
-    private val noSignals = object : BackupSignals { override fun backingUp() = false; override fun lastActivityMs() = 0L }
     private val silent = object : WaveNotifier {
         override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {}
         override fun stuck(reason: String) {}
@@ -45,15 +44,16 @@ class TransferLoopTest {
         val engine = IngestEngine(storage, ledger, reserveBytes = 100_000)
         var clock = 0L
         val tracker = BackupTracker(ledger, { clock })
-        // Google Photos: every free-up removes everything VERIFIED (= backed up)
-        val freeUp = object : FreeUpAction {
+        // You, each time the Pixel is full: tap Free up space (window opens), Google frees everything backed up
+        val freeUp = object : WaveNotifier {
             var runs = 0
-            override fun requestFreeUp(auto: Boolean): Boolean {
-                runs++; tracker.openFreeUpWindow(); ledger.byState(ItemState.VERIFIED).forEach { File(it.pixelPath!!).delete() }; return true
+            override fun waiting(neededBytes: Long, freeBytes: Long, attempt: Int) {
+                runs++; tracker.openFreeUpWindow(); ledger.byState(ItemState.VERIFIED).forEach { File(it.pixelPath!!).delete() }
             }
+            override fun stuck(reason: String) {}
+            override fun resumed() {}
         }
-        val wave = WaveCoordinator(engine, tracker, noSignals, freeUp, silent, { clock },
-            quietMs = 0, retryMs = 0, settleMs = 0)
+        val wave = WaveCoordinator(engine, tracker, freeUp, { clock })
         val profile = DeviceProfile("iphone-1", "Mom", "iPhone13")
         fun loop() = TransferLoop(engine, wave, ledger, cancelled = { false }, retryDelayMs = 0, waveSleepMs = 0,
             beforeEach = { clock += 1000 })
@@ -82,7 +82,7 @@ class TransferLoopTest {
         var n = 0
         val ledger = MemoryLedger()
         val engine = IngestEngine(FakeStorage(tempDir()), ledger, reserveBytes = 0)
-        val wave = WaveCoordinator(engine, BackupTracker(ledger), noSignals, object : FreeUpAction { override fun requestFreeUp(auto: Boolean) = true }, silent)
+        val wave = WaveCoordinator(engine, BackupTracker(ledger), silent)
         val loop = TransferLoop(engine, wave, ledger, cancelled = { n >= 10 }, onUpdate = { n = it.done })
         assertEquals(LoopEnd.CANCELLED, loop.run(DeviceProfile("d", "S", "Oppo"), phone, phone.entries()))
         val saved = ledger.byState(ItemState.VERIFIED).size
@@ -99,7 +99,7 @@ class TransferLoopTest {
         val entries = (0 until 2320).map { SourceEntry("k$it", "IMG_$it.jpg", 100, it.toLong(), "DCIM", "$it") }
         val ledger = MemoryLedger()
         val engine = IngestEngine(FakeStorage(tempDir()), ledger, reserveBytes = 0)
-        val wave = WaveCoordinator(engine, BackupTracker(ledger), noSignals, object : FreeUpAction { override fun requestFreeUp(auto: Boolean) = true }, silent)
+        val wave = WaveCoordinator(engine, BackupTracker(ledger), silent)
         val loop = TransferLoop(engine, wave, ledger, cancelled = { false }, retryDelayMs = 0)
         assertEquals(LoopEnd.ALL_FAILING, loop.run(DeviceProfile("d", "S", "Pad"), phone, entries))
         assertTrue(phone.calls < 30, "gave up after a handful, not 2,320 files: ${phone.calls}")

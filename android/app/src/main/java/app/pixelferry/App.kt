@@ -8,6 +8,12 @@ import app.pixelferry.core.IngestEngine
 import app.pixelferry.core.WaveCoordinator
 import app.pixelferry.sources.MediaSource
 
+object GooglePhotos {
+    const val PKG = "com.google.android.apps.photos"
+    fun open(ctx: android.content.Context): Boolean = ctx.packageManager.getLaunchIntentForPackage(PKG)
+        ?.let { ctx.startActivity(it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)); true } ?: false
+}
+
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
@@ -46,7 +52,29 @@ object Hub {
             foundElsewhere = { name, size -> storage.existsElsewhere(name, size) },
             freeBytes = { storage.freeBytes() })
     }
-    val wave by lazy { WaveCoordinator(engine, tracker, PhotosWatcher.Signals, FreeUpController, Notifs) }
+    val wave by lazy { WaveCoordinator(engine, tracker, Notifs) }
+
+    /**
+     * Manual free-up: you tap "Free up space" in PixelFerry (opens a window for up to 2 h, then Google Photos);
+     * in Google Photos you run its own Free up space; back in PixelFerry you tap Continue / Check.
+     * Only photos Google removed during that window count as backed up.
+     */
+    fun startFreeUp(ctx: android.content.Context) {
+        Thread { tracker.openFreeUpWindow(2 * 3600_000L) }.start()
+        ctx.getSharedPreferences("pf", 0).edit().putLong("freeUpStarted", System.currentTimeMillis()).apply()
+        GooglePhotos.open(ctx)
+    }
+
+    /** "Continue"/"Check": credit what Google freed, close the window. @return files now confirmed backed up. */
+    fun finishFreeUp(ctx: android.content.Context): Int {
+        val r = tracker.reconcile()
+        tracker.closeWindow()
+        ctx.getSharedPreferences("pf", 0).edit().remove("freeUpStarted").apply()
+        return r.backedUp
+    }
+
+    fun freeUpInProgress(ctx: android.content.Context): Boolean =
+        tracker.isWindowOpen() && ctx.getSharedPreferences("pf", 0).getLong("freeUpStarted", 0) > 0
 
     /** The source the user currently has open (USB device or folder). */
     @Volatile var source: MediaSource? = null

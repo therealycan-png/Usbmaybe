@@ -95,9 +95,7 @@ class EfficiencyBenchmark {
             override fun publish(file: File, mime: String, dateTakenMs: Long) {}
         }
         val engine = IngestEngine(storage, ledger, reserveBytes = 0)
-        val wave = WaveCoordinator(engine, BackupTracker(ledger), object : BackupSignals {
-            override fun backingUp() = false; override fun lastActivityMs() = 0L
-        }, object : FreeUpAction { override fun requestFreeUp(auto: Boolean) = true }, silent)
+        val wave = WaveCoordinator(engine, BackupTracker(ledger), silent)
         val loop = TransferLoop(engine, wave, ledger, cancelled = { false })
         val total = sizes.sumOf { it.toLong() }
         val t0 = System.nanoTime()
