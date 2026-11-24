@@ -134,6 +134,8 @@ class MainActivity : Activity() {
     } }
     private val resumeBtn by lazy { btn("Resume", primary = true) { resume() } }
     private val seeBtn by lazy { btn("See them in Google Photos") { seeInPhotos(Hub.run.tag) } }
+    private val whyLink by lazy { btn("Why weren't some sent?", color = C.WARN) { showWhy(Hub.source?.deviceKey ?: lastDeviceKey, Hub.run.deviceLabel) } }
+    private var lastDeviceKey = ""
 
     private fun resume() {
         val src = Hub.source
@@ -170,7 +172,7 @@ class MainActivity : Activity() {
     private var oursBytes = 0L
     private val runCard by lazy {
         card().add(runChip, runTitle, centered(ring).apply { setPadding(0, dp(12), 0, dp(4)) }, stats,
-            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, diag, freeHelp, freeBtn, continueBtn, nothingToFreeBtn, skipBtn, storageBtn, folderTip, detailsLink, stopBtn)
+            runDetail.apply { gravity = Gravity.CENTER_HORIZONTAL }, batteryCard, resumeBtn, seeBtn, whyLink, diag, freeHelp, freeBtn, continueBtn, nothingToFreeBtn, skipBtn, storageBtn, folderTip, detailsLink, stopBtn)
     }
     /** Google backs up a new device folder only after one switch in Google Photos: ask right away, not hours later. */
     private val folderTip by lazy {
@@ -186,6 +188,7 @@ class MainActivity : Activity() {
 
     private fun tick() {
         val r = Hub.run
+        Hub.source?.let { lastDeviceKey = it.deviceKey }
         val showRun = r.active || r.total > 0
         if (showRun && runCard.parent == null) runBox.addView(runCard)
         if (!showRun && runCard.parent != null) runBox.removeView(runCard)
@@ -211,6 +214,8 @@ class MainActivity : Activity() {
             freeHelp.visibility = if (waiting) View.VISIBLE else View.GONE
             resumeBtn.visibility = if (!r.active && r.phase in setOf(Phase.UNPLUGGED, Phase.STOPPED, Phase.ERROR) && r.total > r.done) View.VISIBLE else View.GONE
             resumeBtn.text = "Resume · %,d left".format((r.total - r.done).coerceAtLeast(0))
+            whyLink.visibility = if (!r.active && r.failed > 0) View.VISIBLE else View.GONE
+            whyLink.text = "%,d weren't sent: see why and retry".format(r.failed)
             seeBtn.visibility = if (!r.active && r.phase in setOf(Phase.DONE, Phase.DONE_PENDING_GOOGLE) && r.tag.isNotEmpty()) View.VISIBLE else View.GONE
             folderTip.visibility = if (r.active && !waiting && r.phase in setOf(Phase.COPYING, Phase.FINISHING) && r.done > 0 &&
                 (r.done - r.failed - r.skipped) > 0 &&
@@ -590,6 +595,10 @@ class MainActivity : Activity() {
             thread {
                 // remind which devices have backed-up photos waiting to be deleted
                 val waitingGoogle = Hub.ledger.countState(ItemState.VERIFIED) + Hub.ledger.countState(ItemState.MISSING_UNKNOWN)
+                val notSent = if (Hub.run.active) emptyList() else Hub.ledger.devices().mapNotNull { d ->
+                    val n = app.pixelferry.Diagnostics.failed(this, d.deviceKey).size
+                    if (n > 0) Triple(d.deviceKey, "${d.owner}'s ${d.label}", n) else null
+                }
                 val list = (Hub.ledger.devices()).mapNotNull { d ->
                     val n = Hub.ledger.deletableFor(d.deviceKey).size
                     if (n > 0 && !d.deviceKey.startsWith("pc:")) "${d.owner}'s ${d.label}" to n else null
@@ -598,6 +607,8 @@ class MainActivity : Activity() {
                     if (isDestroyed) return@runOnUiThread
                     deleteBox.removeAllViews()
                     if (waitingGoogle > 0 && !Hub.run.active) deleteBox.addView(makeDeletableTile(waitingGoogle))
+                    for ((key, label, n) in notSent) deleteBox.addView(tile("⚠️", C.TINT_AMBER, "%,d not sent from $label".format(n),
+                        "See why, and retry them") { showWhy(key, label) })
                     for ((label, n) in list) deleteBox.addView(tile("🧹", C.TINT_GREEN, "Delete originals from $label",
                         "%,d are safe in Google Photos. Plug it in to delete them there.".format(n)) { cableHelp() })
                 }
@@ -697,7 +708,39 @@ class MainActivity : Activity() {
                     "🛟 Safety\nNothing is deleted anywhere until Google Photos has it, and you confirm twice.")
                 .setPositiveButton("OK", null).show()
         },
-        tile("⚙️", C.TINT_AMBER, "Setup", "Permissions and Google Photos settings") { startActivity(Intent(this, SetupActivity::class.java)) })
+        tile("⚙️", C.TINT_AMBER, "Setup", "Permissions and Google Photos settings") { startActivity(Intent(this, SetupActivity::class.java)) },
+        tile("🩺", C.TINT_VIOLET, "Send diagnostics", "Log of what happened and why, to share for a fix") { sendDiagnostics() })
+
+    private fun sendDiagnostics() {
+        thread {
+            val zip = app.pixelferry.Diagnostics.zip(this)
+            runOnUiThread { app.pixelferry.ShareProvider.shareFile(this, zip, "PixelFerry diagnostics") }
+        }
+    }
+
+    /** Why files weren't sent: grouped by reason, with what to do, plus Retry. */
+    private fun showWhy(deviceKey: String, label: String) {
+        if (deviceKey.isEmpty()) return
+        thread {
+            val failed = app.pixelferry.Diagnostics.failed(this, deviceKey)
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                if (failed.isEmpty()) { toast("Everything from $label has been sent."); return@runOnUiThread }
+                val text = failed.groupBy { it.reason }.entries.sortedByDescending { it.value.size }.joinToString("\n\n") { (reason, list) ->
+                    "%,d × %s\n→ %s\ne.g. %s".format(list.size, reason.label, reason.advice, list.take(3).joinToString(", ") { it.name })
+                }
+                val connected = Hub.source?.let { it.deviceKey == deviceKey && it.isConnected() } == true
+                AlertDialog.Builder(this).setTitle("%,d not sent from ${label.ifEmpty { "this device" }}".format(failed.size))
+                    .setMessage(text + "\n\nThey're still on the device. Nothing was lost.")
+                    .setPositiveButton(if (connected) "Retry them" else "Retry (plug it in)") { _, _ ->
+                        if (connected) startActivity(Intent(this, PickActivity::class.java).putExtra(PickActivity.EXTRA_RETRY, true))
+                        else { getSharedPreferences("pf", 0).edit().putString("retryDevice", deviceKey).putLong("retryAt", System.currentTimeMillis()).apply(); cableHelp() }
+                    }
+                    .setNeutralButton("Send diagnostics") { _, _ -> sendDiagnostics() }
+                    .setNegativeButton("Close", null).show()
+            }
+        }
+    }
 
     companion object {
         const val ACTION_USB_PERMISSION = "app.pixelferry.USB_PERMISSION"

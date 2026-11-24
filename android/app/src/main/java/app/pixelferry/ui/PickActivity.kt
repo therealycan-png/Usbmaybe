@@ -95,7 +95,9 @@ class PickActivity : Activity() {
         val prof = Hub.ledger.device(s.deviceKey)
         val prefs = getSharedPreferences("pf", 0)
         owner.setText(prof?.owner ?: prefs.getString("lastOwner", "") ?: "")
-        label.setText(prof?.label ?: s.suggestedLabel.replace(" ", ""))
+        // known model codes get their real name (e.g. OPD2415 -> OnePlus Pad 3): new files go to that folder
+        val friendly = s.suggestedLabel.replace(" ", "")
+        label.setText(if (prof == null || app.pixelferry.DeviceNames.isRawCode(prof.label)) friendly else prof.label)
         styleField(owner); styleField(label)
 
         val left = entries.count { it.itemKey !in done }
@@ -106,6 +108,19 @@ class PickActivity : Activity() {
             chip("✓  %,d already sent before".format(entries.size - left), C.SUCCESS, C.CARD),
             p("They're skipped automatically. %,d new to send.".format(left), 15f)))
 
+        // "Retry them": send only the files that weren't sent, straight away
+        val prefsR = getSharedPreferences("pf", 0)
+        val retryAsked = intent.getBooleanExtra(EXTRA_RETRY, false) ||
+            (prefsR.getString("retryDevice", "") == s.deviceKey && System.currentTimeMillis() - prefsR.getLong("retryAt", 0) < 3 * 3600_000L)
+        prefsR.edit().remove("retryDevice").remove("retryAt").apply()
+        if (retryAsked && prof != null) {
+            val keys = app.pixelferry.Diagnostics.failed(this, s.deviceKey).map { it.itemKey }.toSet()
+            val retry = entries.filter { it.itemKey in keys && it.itemKey !in done }
+            if (retry.isNotEmpty()) {
+                app.pixelferry.Diagnostics.log(this, "RETRY", "${retry.size} files from ${prof.owner}'s ${prof.label}")
+                body.post { start(retry) }
+            }
+        }
         resumeSelection()?.let { keys ->
             val n = entries.count { it.itemKey in keys && it.itemKey !in done }
             val prefs2 = getSharedPreferences("pf", 0)
@@ -342,6 +357,7 @@ class PickActivity : Activity() {
     companion object {
         const val GOOGLE_MAX_VIDEO = 10L * 1024 * 1024 * 1024
         const val EXTRA_AUTO_RESUME = "autoResume"
+        const val EXTRA_RETRY = "retryFailed"
         /** File remembering what was picked for a device (survives the Pixel or the device dying). */
         fun selectionName(deviceKey: String): String =
             "selection-" + MessageDigest.getInstance("SHA-256").digest(deviceKey.toByteArray()).joinToString("") { "%02x".format(it) }.take(16) + ".txt"

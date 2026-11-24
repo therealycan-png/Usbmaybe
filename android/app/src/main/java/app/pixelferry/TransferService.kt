@@ -89,6 +89,7 @@ class TransferService : Service() {
                 Hub.run.title = "Something went wrong"
                 Hub.run.detail = friendly(e)
                 Hub.run.errors += e.toString()
+                Diagnostics.log(this, "ERROR", android.util.Log.getStackTraceString(e).take(4000))
             } finally {
                 Hub.run.active = false
                 updateNotif(force = true)
@@ -157,7 +158,14 @@ class TransferService : Service() {
                 p.errors.lastOrNull()?.let { if (it !in r.errors) r.errors += it }
                 updateNotif()
             })
-        val end = loop.run(job.profile, job.source, job.entries)
+        Diagnostics.log(this, "RUN", "start ${r.deviceLabel} key=${job.profile.deviceKey} files=${job.entries.size} bytes=${job.entries.sumOf { it.approxSize }} free=${Hub.storage.freeBytes()}")
+        val end = try { loop.run(job.profile, job.source, job.entries) } finally {
+            val pr = loop.progress
+            Diagnostics.recordFailures(this, job.profile.deviceKey, r.deviceLabel, pr.failures.toList())
+            Diagnostics.log(this, "RUN", "end stored=${pr.stored} dup=${pr.duplicates} skipped=${pr.skipped} failed=${pr.failed} copied=${pr.copiedBytes}")
+            Diagnostics.snapshot(this)
+        }
+        Diagnostics.log(this, "RUN", "result $end")
         val p = loop.progress
         when (end) {
             LoopEnd.CANCELLED -> {

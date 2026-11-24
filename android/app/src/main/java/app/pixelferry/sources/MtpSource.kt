@@ -34,8 +34,8 @@ class MtpSource private constructor(
     private val serial = info?.serialNumber?.takeIf { it.isNotBlank() } ?: usb.serialNumberSafe()?.takeIf { it.isNotBlank() }
         ?: "noserial-${info?.model ?: usb.productName}" // stable across re-plugs (deviceName is not)
     override val deviceKey = "usb:${usb.vendorId}:${usb.productId}:$serial"
-    override val suggestedLabel: String = listOfNotNull(info?.model?.takeIf { it.isNotBlank() }, usb.productName)
-        .firstOrNull() ?: "USB device"
+    override val suggestedLabel: String = app.pixelferry.DeviceNames.friendly(info?.model)
+        ?: listOfNotNull(info?.model?.takeIf { it.isNotBlank() }, usb.productName).firstOrNull() ?: "USB device"
 
     @Volatile private var open = true
     override fun isConnected() = open
@@ -114,6 +114,9 @@ class MtpSource private constructor(
 
     override fun copyTo(entry: SourceEntry, dest: File) { copyHashed(entry, dest) }
 
+    private fun logMode() = app.pixelferry.Diagnostics.log(app.pixelferry.App.instance, "MTP",
+        "${info?.manufacturer} ${info?.model} serial=${serial.take(6)}…: read mode $mode chunk=$chunk")
+
     @Volatile private var byteListener: ((Long) -> Unit)? = null
     override fun onBytes(listener: ((Long) -> Unit)?) { byteListener = listener }
 
@@ -139,6 +142,7 @@ class MtpSource private constructor(
             }
             if (sha != null) return@synchronized sha
             mode = ReadMode.IMPORT
+            app.pixelferry.Diagnostics.log(app.pixelferry.App.instance, "MTP", "${info?.manufacturer} ${info?.model}: no partial reads; using importFile")
         }
         val pfd = ParcelFileDescriptor.open(dest,
             ParcelFileDescriptor.MODE_WRITE_ONLY or ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_TRUNCATE)
@@ -181,9 +185,9 @@ class MtpSource private constructor(
         // first chunk ever: find what the device supports (big chunk, then a small one)
         for (size in intArrayOf(CHUNK, 128 * 1024)) {
             val w = minOf(want, size.toLong())
-            try { val n = mtp.getPartialObject64(h, off, w, buf); if (n >= 0) { mode = ReadMode.P64; chunk = size; return n } } catch (_: Exception) {}
+            try { val n = mtp.getPartialObject64(h, off, w, buf); if (n >= 0) { mode = ReadMode.P64; chunk = size; logMode(); return n } } catch (_: Exception) {}
             if (!open) throw IOException("The device was unplugged")
-            try { val n = mtp.getPartialObject(h, off, w, buf); if (n >= 0) { mode = ReadMode.P32; chunk = size; return n } } catch (_: Exception) {}
+            try { val n = mtp.getPartialObject(h, off, w, buf); if (n >= 0) { mode = ReadMode.P32; chunk = size; logMode(); return n } } catch (_: Exception) {}
             if (!open) throw IOException("The device was unplugged")
         }
         return -1

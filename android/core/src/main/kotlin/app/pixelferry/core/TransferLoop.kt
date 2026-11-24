@@ -31,7 +31,38 @@ interface CopySource {
     fun onBytes(listener: ((Long) -> Unit)?) {}
 }
 
+/** Why a file wasn't sent, in plain words (grouped on screen and written to diagnostics). */
+enum class FailReason(val label: String, val advice: String) {
+    REFUSED("The device refused to send it", "Keep the device unlocked and on File transfer, then Retry."),
+    UNPLUGGED("The cable was unplugged or the device locked", "Plug it back in, unlock it, then Retry."),
+    NO_ROOM("It didn't fit in the Pixel's free space", "Free space on the Pixel (Make them deletable, or Pixel storage), then Retry."),
+    TOO_BIG_FOR_GOOGLE("Video over 10 GB: Google Photos can't back it up", "Keep it on a computer or drive; Retry won't help."),
+    CHECK_FAILED("The copy arrived damaged (checksum/size didn't match)", "Usually a loose cable. Retry."),
+    INCOMPLETE_BIG("Over 4 GB and the device couldn't send all of it", "Send it from a computer instead."),
+    PIXEL_STORAGE("The Pixel couldn't save it", "Check PixelFerry's storage permission in Setup, then Retry."),
+    OTHER("Something unexpected", "Retry; if it keeps failing, send diagnostics."),
+}
+
+data class Failure(val entry: SourceEntry, val reason: FailReason, val detail: String)
+
+fun classify(t: Throwable?, detail: String = t?.message ?: ""): FailReason {
+    val m = detail.lowercase()
+    return when {
+        t is TooBigForGoogle -> FailReason.TOO_BIG_FOR_GOOGLE
+        "over 4 gb" in m || "4 gb" in m -> FailReason.INCOMPLETE_BIG
+        t is VerifyFailed -> FailReason.CHECK_FAILED
+        t is NotEnoughSpace || "fit in the pixel" in m || "no space" in m || "enospc" in m -> FailReason.NO_ROOM
+        "refused" in m || "stopped sending" in m -> FailReason.REFUSED
+        "unplugged" in m || "disconnect" in m || "was locked" in m -> FailReason.UNPLUGGED
+        "file transfer" in m -> FailReason.REFUSED
+        "cannot create" in m || "permission" in m || "rename failed" in m || "could not record" in m -> FailReason.PIXEL_STORAGE
+        else -> FailReason.OTHER
+    }
+}
+
 class Progress {
+    /** Every file that wasn't sent this run, with the reason. */
+    val failures = java.util.concurrent.CopyOnWriteArrayList<Failure>()
     @Volatile var total = 0
     @Volatile var done = 0
     @Volatile var bytesTotal = 0L
@@ -110,10 +141,10 @@ class TransferLoop(
                             is IngestResult.AlreadyHave -> p.skipped++
                         } }
                     } catch (ex: TooBigForGoogle) {
-                        outcome = { p -> p.failed++; p.errors += ex.message ?: e.name }
+                        outcome = { p -> p.failed++; p.errors += ex.message ?: e.name; p.failures += Failure(e, FailReason.TOO_BIG_FOR_GOOGLE, ex.message ?: "") }
                     } catch (t: Throwable) {
                         // bad copy (or disk hiccup): fetch it again later
-                        if (j.attempt + 1 >= 3) outcome = { p -> p.failed++; p.errors += "${e.name}: ${t.message}" }
+                        if (j.attempt + 1 >= 3) outcome = { p -> p.failed++; p.errors += "${e.name}: ${t.message}"; p.failures += Failure(e, classify(t), t.toString()) }
                         else { retries += e to j.attempt + 1; continue }
                     }
                     try { advance(e, outcome) } catch (_: Throwable) { /* progress display only */ }
@@ -200,14 +231,15 @@ class TransferLoop(
                 drain() // let pending files finish so their space is counted properly
                 if (!engine.hasRoomFor(e.approxSize) && !wave.awaitRoom(e.approxSize, cancelled, waveSleepMs)) {
                     if (wave.skipped) {
-                        advance(e) { p -> p.failed++; p.errors += "${e.name}: skipped (didn't fit in the Pixel's free space). It's still on the device." }
+                        advance(e) { p -> p.failed++; p.errors += "${e.name}: skipped (didn't fit in the Pixel's free space). It's still on the device."
+                            p.failures += Failure(e, FailReason.NO_ROOM, "skipped by you; needed ${e.approxSize} bytes + reserve") }
                         return null
                     }
                     return if (wave.gaveUp) LoopEnd.STUCK_FULL else LoopEnd.CANCELLED
                 }
             } catch (ex: IOException) {
                 if (!source.isConnected()) return LoopEnd.UNPLUGGED
-                if (++attempt >= 3) { advance(e) { p -> p.failed++; p.errors += "${e.name}: ${ex.message}" }; return null }
+                if (++attempt >= 3) { advance(e) { p -> p.failed++; p.errors += "${e.name}: ${ex.message}"; p.failures += Failure(e, classify(ex), ex.toString()) }; return null }
                 Thread.sleep(retryDelayMs)
             }
         }

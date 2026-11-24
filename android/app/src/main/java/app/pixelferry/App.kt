@@ -18,6 +18,13 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // any crash is written to the diagnostics log before Android shows "keeps stopping"
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try { Diagnostics.crash(this, e) } catch (_: Throwable) {}
+            previous?.uncaughtException(t, e)
+        }
+        Diagnostics.log(this, "START", "app opened")
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH_RUN, "Transfer progress", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel(CH_ALERT, "Needs you", NotificationManager.IMPORTANCE_HIGH))

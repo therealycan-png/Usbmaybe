@@ -45,6 +45,14 @@ class ShareProvider : ContentProvider() {
 
     companion object {
         /** Build PixelFerry-Send.zip (sender + this Pixel's pairing code) and open the share sheet. */
+        /** Share any file already placed in cacheDir/share (e.g. the diagnostics zip). */
+        fun shareFile(ctx: Context, file: File, subject: String) {
+            val uri = Uri.parse("content://app.pixelferry.share/${file.name}")
+            val send = Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM, uri)
+                .putExtra(Intent.EXTRA_SUBJECT, subject).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            ctx.startActivity(Intent.createChooser(send, subject).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+
         fun shareSender(ctx: Context, code: String) {
             val dir = File(ctx.cacheDir, "share").apply { mkdirs() }
             val zip = File(dir, "PixelFerry-Send.zip")
